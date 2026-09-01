@@ -1,5 +1,7 @@
 """XAnalyse 运行时数据模型。"""
 
+from __future__ import annotations
+
 from typing import Literal
 from dataclasses import dataclass
 
@@ -34,6 +36,7 @@ class TweetData:
     verified: bool = False
     is_retweet: bool = False
     avatar_url: str = ""
+    quote: TweetData | None = None
 
 
 @dataclass(frozen=True)

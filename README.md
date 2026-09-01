@@ -10,6 +10,7 @@
 - `twitter <用户主页>`：请求 FxTwitter 用户时间线并解析该用户最新一条推文。
 - 开启 `detectXLinks` 后，普通消息中的 X/Twitter 推文链接会自动解析。
 - `enableScreenshot` 开启时用 Pillow 绘制 X 风格卡片，卡片内嵌媒体预览和有数据的统计图标。
+- 支持引用推文（Quote Tweet）：外层推文下方以接近 X 原生样式的嵌套卡片展示被引用作者、正文和媒体。
 - `tt` 手动检查订阅；首次检查只建立基线，之后的新推文通过 `gs_subscribe` 推送。
 - X GIF 通常以无音轨 MP4 返回；插件会探测音轨并按 `gifQuality` 合成为 GIF。
 - 视频选择 API 返回的最高码率 MP4，并修正 H.264 BT.709 色域标记。

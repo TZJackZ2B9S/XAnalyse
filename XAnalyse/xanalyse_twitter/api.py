@@ -425,7 +425,7 @@ def _append_media(media: list[MediaItem], seen: set[str], raw: object, *, articl
         )
 
 
-def _tweet_data_from_mapping(tweet: Mapping[str, object]) -> TweetData:
+def _tweet_data_from_mapping(tweet: Mapping[str, object], *, quote_depth: int = 0) -> TweetData:
     author = _object(_value(tweet, "author"))
     author_name = _string(author, "name", "未知用户") if author is not None else "未知用户"
     author_handle = _string(author, "screen_name") if author is not None else ""
@@ -474,6 +474,11 @@ def _tweet_data_from_mapping(tweet: Mapping[str, object]) -> TweetData:
     retweets = _number(tweet, "retweets")
     if retweets is None:
         retweets = _number(tweet, "reposts")
+    quote: TweetData | None = None
+    if quote_depth == 0:
+        raw_quote = _object(_value(tweet, "quote"))
+        if raw_quote is not None:
+            quote = _tweet_data_from_mapping(raw_quote, quote_depth=quote_depth + 1)
     return TweetData(
         text=text,
         author_name=author_name or "未知用户",
@@ -487,6 +492,7 @@ def _tweet_data_from_mapping(tweet: Mapping[str, object]) -> TweetData:
         verified=verified,
         is_retweet=_object(_value(tweet, "reposted_by")) is not None,
         avatar_url=avatar_url.strip(),
+        quote=quote,
     )
 
 

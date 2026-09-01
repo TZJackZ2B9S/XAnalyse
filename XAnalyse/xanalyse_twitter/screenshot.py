@@ -56,7 +56,6 @@ _CARD_LINE_HEIGHT = 52
 _CARD_BODY_MAX_LINES = 27
 _MAX_AVATAR_BYTES = 1 * 1024 * 1024
 _AVATAR_TIMEOUT = httpx.Timeout(4.0, connect=2.0, pool=2.0)
-_MAX_PREVIEW_BYTES = 1_500_000
 _MAX_PREVIEW_ITEMS = 4
 _PREVIEW_TIMEOUT = httpx.Timeout(4.0, connect=2.0, pool=2.0)
 _PREVIEW_SIZE = (1_200, 1_200)
@@ -69,6 +68,10 @@ _MULTI_MEDIA_MAX_HEIGHT = 1_800
 _MULTI_MEDIA_MIN_HEIGHT = 220
 _MEDIA_RADIUS = 20
 _MEDIA_GAP = 16
+_QUOTE_PADDING = 28
+_QUOTE_TEXT_LINE_HEIGHT = 44
+_QUOTE_TEXT_MAX_LINES = 8
+_QUOTE_MEDIA_MAX_HEIGHT = 1_000
 
 _BG = (247, 249, 250)
 _WHITE = (255, 255, 255)
@@ -80,6 +83,7 @@ _BLUE = (29, 155, 240)
 _BLUE_DARK = (15, 120, 190)
 
 _CORE_EMOJI_FONT = files("gsuid_core.utils.fonts").joinpath("TwemojiMozilla-colr.woff2")
+_COLOR_EMOJI_FONT_PATHS = ("NotoColorEmoji.ttf", files("gsuid_core.utils.fonts").joinpath("NotoColorEmoji.ttf"))
 _CJK_FALLBACK_FONT_NAMES = ("NotoSansCJK-Regular.ttc", "SourceHanSansCN-Regular.ttc")
 _UNICODE_FALLBACK_FONT_NAMES = ("unifont_upper.otf", "unifont.otf")
 _SYMBOL_EMOJI_FONT_NAMES = ("Symbola_hint.ttf", "DejaVuSans.ttf")
@@ -88,10 +92,14 @@ _COLOR_EMOJI_NATIVE_HEIGHT = 128
 
 @lru_cache(maxsize=1)
 def _color_emoji_font() -> ImageFont.FreeTypeFont | None:
-    try:
-        return ImageFont.truetype(_CORE_EMOJI_FONT, size=109)
-    except OSError:
-        return None
+    for path in (*_COLOR_EMOJI_FONT_PATHS, _CORE_EMOJI_FONT):
+        try:
+            emoji_font = ImageFont.truetype(path, size=109)
+        except OSError:
+            continue
+        if emoji_font.getmask("❤️").getbbox() is not None:
+            return emoji_font
+    return None
 
 
 @lru_cache(maxsize=32)
@@ -367,7 +375,7 @@ def _thumbnail_media(data: bytes) -> bytes | None:
 
 
 def _preview_url(url: str) -> str:
-    """优先请求 X 图床的 large 变体，避免下载超大 orig 原图。"""
+    """优先请求 X 图床的 medium 变体，兼顾清晰度和卡片渲染开销。"""
 
     parsed = urlsplit(url)
     if (parsed.hostname or "").lower() != "pbs.twimg.com":
@@ -375,10 +383,10 @@ def _preview_url(url: str) -> str:
     query = parse_qsl(parsed.query, keep_blank_values=True)
     for index, (key, _value) in enumerate(query):
         if key == "name":
-            query[index] = (key, "large")
+            query[index] = (key, "medium")
             break
     else:
-        query.append(("name", "large"))
+        query.append(("name", "medium"))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
@@ -400,13 +408,8 @@ async def _download_media_preview(client: httpx.AsyncClient, item: MediaItem) ->
             timeout=_PREVIEW_TIMEOUT,
         ) as response:
             response.raise_for_status()
-            content_length = response.headers.get("content-length")
-            if content_length is not None and content_length.isdigit() and int(content_length) > _MAX_PREVIEW_BYTES:
-                return None
             chunks = bytearray()
             async for chunk in response.aiter_bytes():
-                if len(chunks) + len(chunk) > _MAX_PREVIEW_BYTES:
-                    return None
                 chunks.extend(chunk)
             if not chunks:
                 return None
@@ -515,6 +518,7 @@ def _media_panel_size_for_width(
     panel_width: int,
     *,
     single: bool,
+    max_panel_height: int | None = None,
 ) -> tuple[int, int]:
     aspect = _preview_aspect(preview)
     if aspect is None:
@@ -522,6 +526,8 @@ def _media_panel_size_for_width(
 
     max_height = _SINGLE_MEDIA_MAX_HEIGHT if single else _MULTI_MEDIA_MAX_HEIGHT
     min_height = _SINGLE_MEDIA_MIN_HEIGHT if single else _MULTI_MEDIA_MIN_HEIGHT
+    if max_panel_height is not None:
+        max_height = min(max_height, max_panel_height)
     panel_height = round(panel_width / aspect)
     if panel_height > max_height:
         panel_height = max_height
@@ -542,6 +548,8 @@ def _media_rows(previews: tuple[MediaPreview, ...]) -> tuple[tuple[int, ...], ..
 def _media_layout(
     previews: tuple[MediaPreview, ...],
     max_width: int,
+    *,
+    max_panel_height: int | None = None,
 ) -> tuple[tuple[_MediaSlot, ...], int]:
     """计算媒体网格位置，所有行都在同一个内容宽度内对齐。"""
 
@@ -571,6 +579,7 @@ def _media_layout(
                 previews[index],
                 column_widths[column],
                 single=full_width and column_count == 1,
+                max_panel_height=max_panel_height,
             )
             for column, index in enumerate(row_indices)
         )
@@ -594,8 +603,13 @@ def _media_layout(
     return tuple(slots), max(0, row_top - _MEDIA_GAP)
 
 
-def _media_section_height(previews: tuple[MediaPreview, ...], max_width: int) -> int:
-    return _media_layout(previews, max_width)[1]
+def _media_section_height(
+    previews: tuple[MediaPreview, ...],
+    max_width: int,
+    *,
+    max_panel_height: int | None = None,
+) -> int:
+    return _media_layout(previews, max_width, max_panel_height=max_panel_height)[1]
 
 
 def _draw_media_previews(
@@ -604,10 +618,13 @@ def _draw_media_previews(
     previews: tuple[MediaPreview, ...],
     top: int,
     max_width: int,
+    *,
+    origin_x: int = _CARD_MARGIN,
+    max_panel_height: int | None = None,
 ) -> None:
     if not previews:
         return
-    slots, _section_height = _media_layout(previews, max_width)
+    slots, _section_height = _media_layout(previews, max_width, max_panel_height=max_panel_height)
     media_background = (239, 243, 244)
 
     def draw_play_icon(panel_draw: ImageDraw.ImageDraw, width: int, height: int) -> None:
@@ -628,7 +645,7 @@ def _draw_media_previews(
     for slot in slots:
         preview = previews[slot.index]
         panel_width, panel_height = slot.width, slot.height
-        left = _CARD_MARGIN + slot.left
+        left = origin_x + slot.left
         panel_top = slot.top
         panel = Image.new("RGB", (panel_width, panel_height), media_background)
         panel_draw = ImageDraw.Draw(panel)
@@ -996,12 +1013,150 @@ def _draw_action_bar(
             )
 
 
+def _quote_text_lines(quote: TweetData, text_font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+    clean_text = quote.text.strip()
+    if not clean_text:
+        return []
+    return _limit_lines(
+        _wrap_card_text(clean_text, text_font, max_width),
+        text_font,
+        max_width,
+        _QUOTE_TEXT_MAX_LINES,
+    )
+
+
+def _quote_section_height(
+    quote: TweetData | None,
+    media_previews: tuple[MediaPreview, ...],
+    max_width: int,
+) -> int:
+    if quote is None:
+        return 0
+    inner_width = max(1, max_width - _QUOTE_PADDING * 2)
+    text_font = _load_card_font(30)
+    text_lines = _quote_text_lines(quote, text_font, inner_width)
+    media_height = _media_section_height(
+        media_previews,
+        inner_width,
+        max_panel_height=_QUOTE_MEDIA_MAX_HEIGHT,
+    )
+    content_height = 60
+    if text_lines:
+        content_height += 14 + len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
+    if media_previews:
+        content_height += 16 + media_height
+    return _QUOTE_PADDING * 2 + content_height
+
+
+def _draw_avatar(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    data: bytes | None,
+    left: int,
+    top: int,
+    size: int,
+    author: str,
+) -> None:
+    avatar_box = (left, top, left + size - 1, top + size - 1)
+    avatar_image = _prepare_avatar(data, size)
+    if avatar_image is None:
+        draw.ellipse(avatar_box, fill=_avatar_color(author))
+        _draw_centered_text(
+            image,
+            draw,
+            (left + size / 2, top + size / 2),
+            author[:1] or "X",
+            _load_card_font(max(18, round(size * 0.42)), bold=True),
+            _WHITE,
+        )
+        return
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    image.paste(avatar_image, (left, top), mask)
+    draw.ellipse(avatar_box, outline=_BORDER, width=2)
+
+
+def _draw_quote_card(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    quote: TweetData,
+    quote_avatar_data: bytes | None,
+    quote_media_previews: tuple[MediaPreview, ...],
+    top: int,
+    max_width: int,
+) -> None:
+    """绘制接近 X 原生样式的嵌套引用推文。"""
+
+    quote_height = _quote_section_height(quote, quote_media_previews, max_width)
+    left = _CARD_MARGIN
+    draw.rounded_rectangle(
+        (left, top, left + max_width, top + quote_height),
+        radius=22,
+        fill=_WHITE,
+        outline=_BORDER,
+        width=2,
+    )
+
+    inner_left = left + _QUOTE_PADDING
+    inner_top = top + _QUOTE_PADDING
+    inner_width = max(1, max_width - _QUOTE_PADDING * 2)
+    avatar_size = 60
+    author = quote.author_name.strip() or "未知用户"
+    _draw_avatar(image, draw, quote_avatar_data, inner_left, inner_top, avatar_size, author)
+
+    author_font = _load_card_font(30, bold=True)
+    handle_font = _load_card_font(22)
+    author_left = inner_left + avatar_size + 16
+    author_label = _ellipsize(author, author_font, max(120, inner_width - avatar_size - 120))
+    _draw_card_text(image, draw, (author_left, inner_top + 1), author_label, author_font, _TEXT)
+    if quote.verified:
+        badge_left = round(author_left + _text_length(author_label, author_font) + 8)
+        draw.ellipse((badge_left, inner_top + 5, badge_left + 22, inner_top + 27), fill=_BLUE)
+        draw.line(
+            (badge_left + 5, inner_top + 16, badge_left + 9, inner_top + 20, badge_left + 17, inner_top + 11),
+            fill=_WHITE,
+            width=2,
+        )
+    quote_handle = quote.author_handle.strip().lstrip("@")
+    _draw_card_text(
+        image,
+        draw,
+        (author_left, inner_top + 36),
+        _ellipsize(f"@{quote_handle}" if quote_handle else "X/Twitter", handle_font, inner_width - avatar_size - 16),
+        handle_font,
+        _SECONDARY,
+    )
+
+    text_font = _load_card_font(30)
+    text_lines = _quote_text_lines(quote, text_font, inner_width)
+    cursor = inner_top + avatar_size
+    if text_lines:
+        cursor += 14
+        for line in text_lines:
+            _draw_card_text(image, draw, (inner_left, cursor), line, text_font, _TEXT)
+            cursor += _QUOTE_TEXT_LINE_HEIGHT
+
+    if quote_media_previews:
+        cursor += 16
+        _draw_media_previews(
+            image,
+            draw,
+            quote_media_previews,
+            cursor,
+            inner_width,
+            origin_x=inner_left,
+            max_panel_height=_QUOTE_MEDIA_MAX_HEIGHT,
+        )
+
+
 def _render_tweet_card_sync(
     tweet: TweetData,
     text: str,
     link: str,
     avatar_data: bytes | None = None,
     media_previews: tuple[MediaPreview, ...] = (),
+    quote_avatar_data: bytes | None = None,
+    quote_media_previews: tuple[MediaPreview, ...] = (),
 ) -> bytes:
     body_font = _load_card_font(34)
     small_font = _load_card_font(25)
@@ -1014,13 +1169,25 @@ def _render_tweet_card_sync(
     timestamp = format_tweet_time(tweet.created_at)
     handle = tweet.author_handle.strip().lstrip("@") or _handle_from_link(link)
     author = tweet.author_name.strip() or "未知用户"
-    avatar_text = author[:1]
-    media_height = _media_section_height(media_previews, max_width)
     footer_height = 190
     media_gap = 18 if media_previews else 0
+    quote_height = _quote_section_height(tweet.quote, quote_media_previews, max_width)
+    quote_gap = 18 if tweet.quote is not None else 0
+    outer_media_max_height = _SINGLE_MEDIA_MAX_HEIGHT
+    if tweet.quote is not None:
+        outer_media_max_height = max(
+            _SINGLE_MEDIA_MIN_HEIGHT,
+            _CARD_MAX_HEIGHT - 166 - _CARD_LINE_HEIGHT - media_gap - quote_gap - quote_height - 18 - footer_height,
+        )
+    media_height = _media_section_height(
+        media_previews,
+        max_width,
+        max_panel_height=outer_media_max_height,
+    )
     max_body_lines = max(
         1,
-        (_CARD_MAX_HEIGHT - 166 - media_gap - media_height - 18 - footer_height) // _CARD_LINE_HEIGHT,
+        (_CARD_MAX_HEIGHT - 166 - media_gap - media_height - quote_gap - quote_height - 18 - footer_height)
+        // _CARD_LINE_HEIGHT,
     )
     body_lines = _limit_lines(
         body_lines,
@@ -1030,7 +1197,9 @@ def _render_tweet_card_sync(
     )
     body_bottom = 166 + len(body_lines) * _CARD_LINE_HEIGHT
     media_top = body_bottom + media_gap
-    divider_y = media_top + media_height + 18
+    media_bottom = media_top + media_height
+    quote_top = media_bottom + quote_gap
+    divider_y = quote_top + quote_height + 18
     height = max(520, min(_CARD_MAX_HEIGHT, divider_y + footer_height))
 
     image = Image.new("RGB", (_CARD_WIDTH, height), _BG)
@@ -1043,22 +1212,7 @@ def _render_tweet_card_sync(
         width=2,
     )
 
-    avatar_center = (_CARD_MARGIN + 42, 92)
-    avatar_box = (
-        avatar_center[0] - 42,
-        avatar_center[1] - 42,
-        avatar_center[0] + 42,
-        avatar_center[1] + 42,
-    )
-    avatar_image = _prepare_avatar(avatar_data, 84)
-    if avatar_image is None:
-        draw.ellipse(avatar_box, fill=_avatar_color(author))
-        _draw_centered_text(image, draw, avatar_center, avatar_text, _load_card_font(36, bold=True), _WHITE)
-    else:
-        mask = Image.new("L", (84, 84), 0)
-        ImageDraw.Draw(mask).ellipse((0, 0, 83, 83), fill=255)
-        image.paste(avatar_image, (int(avatar_box[0]), int(avatar_box[1])), mask)
-        draw.ellipse(avatar_box, outline=_BORDER, width=2)
+    _draw_avatar(image, draw, avatar_data, _CARD_MARGIN, 50, 84, author)
 
     author_x = _CARD_MARGIN + 104
     author_label = _ellipsize(author, author_font, 530)
@@ -1086,7 +1240,24 @@ def _render_tweet_card_sync(
         _draw_card_text(image, draw, (_CARD_MARGIN, body_y), line, body_font, _TEXT)
         body_y += _CARD_LINE_HEIGHT
 
-    _draw_media_previews(image, draw, media_previews, media_top, max_width)
+    _draw_media_previews(
+        image,
+        draw,
+        media_previews,
+        media_top,
+        max_width,
+        max_panel_height=outer_media_max_height,
+    )
+    if tweet.quote is not None:
+        _draw_quote_card(
+            image,
+            draw,
+            tweet.quote,
+            quote_avatar_data,
+            quote_media_previews,
+            quote_top,
+            max_width,
+        )
     draw.line((_CARD_MARGIN, divider_y, _CARD_WIDTH - _CARD_MARGIN, divider_y), fill=_BORDER, width=2)
     _draw_action_bar(image, draw, tweet, divider_y, max_width, small_font)
     media_text = _media_summary(tweet)
@@ -1105,6 +1276,18 @@ def _render_tweet_card_sync(
     return output.getvalue()
 
 
+async def _download_quote_assets(
+    client: httpx.AsyncClient | None,
+    quote: TweetData | None,
+) -> tuple[bytes | None, tuple[MediaPreview, ...]]:
+    if quote is None:
+        return None, ()
+    return await asyncio.gather(
+        _download_avatar(client, quote.avatar_url),
+        _download_media_previews(client, quote.media),
+    )
+
+
 async def render_tweet_card(
     tweet: TweetData,
     text: str,
@@ -1114,12 +1297,14 @@ async def render_tweet_card(
 ) -> ScreenshotResult:
     """在线程池绘制卡片，避免 PIL 阻塞 Core 事件循环。"""
 
-    avatar_data, media_previews = await asyncio.gather(
+    avatar_data, media_previews, quote_assets = await asyncio.gather(
         _download_avatar(client, tweet.avatar_url),
         _download_media_previews(client, tweet.media),
+        _download_quote_assets(client, tweet.quote),
     )
+    quote_avatar_data, quote_media_previews = quote_assets
     try:
-        if avatar_data is None and not media_previews:
+        if avatar_data is None and not media_previews and quote_avatar_data is None and not quote_media_previews:
             data = await asyncio.to_thread(_render_tweet_card_sync, tweet, text, link)
         else:
             data = await asyncio.to_thread(
@@ -1129,6 +1314,8 @@ async def render_tweet_card(
                 link,
                 avatar_data,
                 media_previews,
+                quote_avatar_data,
+                quote_media_previews,
             )
     except (OSError, ValueError) as error:
         logger.warning(f"[XAnalyse] PIL 卡片生成失败：{error}")
@@ -1136,6 +1323,8 @@ async def render_tweet_card(
     finally:
         del avatar_data
         del media_previews
+        del quote_avatar_data
+        del quote_media_previews
     if len(data) > _CARD_MAX_BYTES:
         logger.warning(f"[XAnalyse] PIL 卡片过大（{len(data) / 1024 / 1024:.1f} MiB），跳过发送")
         return ScreenshotResult(data=None)
