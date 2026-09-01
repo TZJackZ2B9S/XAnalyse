@@ -71,7 +71,10 @@ _MEDIA_GAP = 16
 _QUOTE_PADDING = 28
 _QUOTE_TEXT_LINE_HEIGHT = 44
 _QUOTE_TEXT_MAX_LINES = 8
-_QUOTE_MEDIA_MAX_HEIGHT = 1_000
+_QUOTE_MEDIA_SIZE = 192
+_QUOTE_MEDIA_GAP = 4
+_QUOTE_MEDIA_RADIUS = 18
+_QUOTE_BODY_GAP = 16
 
 _BG = (247, 249, 250)
 _WHITE = (255, 255, 255)
@@ -81,6 +84,7 @@ _SECONDARY = (83, 100, 113)
 _MUTED = (113, 118, 123)
 _BLUE = (29, 155, 240)
 _BLUE_DARK = (15, 120, 190)
+_MEDIA_BACKGROUND = (239, 243, 244)
 
 _CORE_EMOJI_FONT = files("gsuid_core.utils.fonts").joinpath("TwemojiMozilla-colr.woff2")
 _COLOR_EMOJI_FONT_PATHS = ("NotoColorEmoji.ttf", files("gsuid_core.utils.fonts").joinpath("NotoColorEmoji.ttf"))
@@ -625,55 +629,13 @@ def _draw_media_previews(
     if not previews:
         return
     slots, _section_height = _media_layout(previews, max_width, max_panel_height=max_panel_height)
-    media_background = (239, 243, 244)
-
-    def draw_play_icon(panel_draw: ImageDraw.ImageDraw, width: int, height: int) -> None:
-        center = (width // 2, height // 2)
-        panel_draw.ellipse(
-            (center[0] - 34, center[1] - 34, center[0] + 34, center[1] + 34),
-            fill=_BLUE,
-        )
-        panel_draw.polygon(
-            (
-                (center[0] - 8, center[1] - 14),
-                (center[0] - 8, center[1] + 14),
-                (center[0] + 15, center[1]),
-            ),
-            fill=_WHITE,
-        )
 
     for slot in slots:
         preview = previews[slot.index]
         panel_width, panel_height = slot.width, slot.height
         left = origin_x + slot.left
         panel_top = slot.top
-        panel = Image.new("RGB", (panel_width, panel_height), media_background)
-        panel_draw = ImageDraw.Draw(panel)
-        media_image = _prepare_media_image(preview.data, (panel_width, panel_height))
-        if media_image is not None:
-            image_left = (panel_width - media_image.width) // 2
-            image_top = (panel_height - media_image.height) // 2
-            media_mask = Image.new("L", media_image.size, 0)
-            ImageDraw.Draw(media_mask).rounded_rectangle(
-                (0, 0, media_image.width - 1, media_image.height - 1),
-                radius=min(_MEDIA_RADIUS, media_image.width // 2, media_image.height // 2),
-                fill=255,
-            )
-            panel.paste(media_image, (image_left, image_top), media_mask)
-        elif preview.type in {"video", "animated_gif"}:
-            draw_play_icon(panel_draw, panel_width, panel_height)
-        else:
-            _draw_centered_text(
-                panel,
-                panel_draw,
-                (panel_width / 2, panel_height / 2),
-                "图片预览不可用",
-                _load_card_font(26),
-                _MUTED,
-            )
-
-        if media_image is not None and preview.type in {"video", "animated_gif"}:
-            draw_play_icon(panel_draw, panel_width, panel_height)
+        panel = _render_media_tile(preview, (panel_width, panel_height))
 
         mask = Image.new("L", (panel_width, panel_height), 0)
         ImageDraw.Draw(mask).rounded_rectangle(
@@ -688,6 +650,62 @@ def _draw_media_previews(
             outline=_BORDER,
             width=2,
         )
+
+
+def _draw_play_icon(panel_draw: ImageDraw.ImageDraw, width: int, height: int) -> None:
+    center = (width // 2, height // 2)
+    panel_draw.ellipse(
+        (center[0] - 34, center[1] - 34, center[0] + 34, center[1] + 34),
+        fill=_BLUE,
+    )
+    panel_draw.polygon(
+        (
+            (center[0] - 8, center[1] - 14),
+            (center[0] - 8, center[1] + 14),
+            (center[0] + 15, center[1]),
+        ),
+        fill=_WHITE,
+    )
+
+
+def _render_media_tile(
+    preview: MediaPreview,
+    size: tuple[int, int],
+    *,
+    round_image: bool = True,
+) -> Image.Image:
+    width, height = size
+    panel = Image.new("RGB", size, _MEDIA_BACKGROUND)
+    panel_draw = ImageDraw.Draw(panel)
+    media_image = _prepare_media_image(preview.data, size)
+    if media_image is not None:
+        image_left = (width - media_image.width) // 2
+        image_top = (height - media_image.height) // 2
+        if round_image:
+            media_mask = Image.new("L", media_image.size, 0)
+            ImageDraw.Draw(media_mask).rounded_rectangle(
+                (0, 0, media_image.width - 1, media_image.height - 1),
+                radius=min(_MEDIA_RADIUS, media_image.width // 2, media_image.height // 2),
+                fill=255,
+            )
+            panel.paste(media_image, (image_left, image_top), media_mask)
+        else:
+            panel.paste(media_image, (image_left, image_top))
+    elif preview.type in {"video", "animated_gif"}:
+        _draw_play_icon(panel_draw, width, height)
+    else:
+        _draw_centered_text(
+            panel,
+            panel_draw,
+            (width / 2, height / 2),
+            "图片预览不可用",
+            _load_card_font(26),
+            _MUTED,
+        )
+
+    if media_image is not None and preview.type in {"video", "animated_gif"}:
+        _draw_play_icon(panel_draw, width, height)
+    return panel
 
 
 def _media_summary(tweet: TweetData) -> str:
@@ -1025,6 +1043,71 @@ def _quote_text_lines(quote: TweetData, text_font: ImageFont.FreeTypeFont, max_w
     )
 
 
+def _quote_text_width(media_previews: tuple[MediaPreview, ...], inner_width: int) -> int:
+    if not media_previews:
+        return inner_width
+    return max(1, inner_width - _QUOTE_MEDIA_SIZE - _QUOTE_BODY_GAP)
+
+
+def _quote_body_layout(
+    quote: TweetData,
+    media_previews: tuple[MediaPreview, ...],
+    inner_width: int,
+) -> tuple[list[str], int]:
+    text_font = _load_card_font(30)
+    text_width = _quote_text_width(media_previews, inner_width)
+    text_lines = _quote_text_lines(quote, text_font, text_width)
+    text_height = len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
+    media_height = _QUOTE_MEDIA_SIZE if media_previews else 0
+    return text_lines, max(text_height, media_height)
+
+
+def _quote_media_cells(count: int, size: int) -> tuple[tuple[int, int, int, int, int], ...]:
+    visible_count = min(max(count, 0), 4)
+    if visible_count == 0:
+        return ()
+    if visible_count == 1:
+        return ((0, 0, size, size, 0),)
+
+    half_width = (size - _QUOTE_MEDIA_GAP) // 2
+    right_width = size - _QUOTE_MEDIA_GAP - half_width
+    if visible_count == 2:
+        return (
+            (0, 0, half_width, size, 0),
+            (half_width + _QUOTE_MEDIA_GAP, 0, right_width, size, 1),
+        )
+
+    half_height = (size - _QUOTE_MEDIA_GAP) // 2
+    bottom_height = size - _QUOTE_MEDIA_GAP - half_height
+    cells = [
+        (0, 0, half_width, half_height, 0),
+        (half_width + _QUOTE_MEDIA_GAP, 0, right_width, half_height, 1),
+    ]
+    if visible_count == 3:
+        cells.append((0, half_height + _QUOTE_MEDIA_GAP, size, bottom_height, 2))
+    else:
+        cells.extend(
+            (
+                (0, half_height + _QUOTE_MEDIA_GAP, half_width, bottom_height, 2),
+                (half_width + _QUOTE_MEDIA_GAP, half_height + _QUOTE_MEDIA_GAP, right_width, bottom_height, 3),
+            )
+        )
+    return tuple(cells)
+
+
+def _render_quote_media_thumbnail(previews: tuple[MediaPreview, ...]) -> Image.Image:
+    visible_previews = previews[:4]
+    thumbnail = Image.new("RGB", (_QUOTE_MEDIA_SIZE, _QUOTE_MEDIA_SIZE), _MEDIA_BACKGROUND)
+    for left, top, width, height, index in _quote_media_cells(len(visible_previews), _QUOTE_MEDIA_SIZE):
+        tile = _render_media_tile(
+            visible_previews[index],
+            (width, height),
+            round_image=False,
+        )
+        thumbnail.paste(tile, (left, top))
+    return thumbnail
+
+
 def _quote_section_height(
     quote: TweetData | None,
     media_previews: tuple[MediaPreview, ...],
@@ -1033,18 +1116,10 @@ def _quote_section_height(
     if quote is None:
         return 0
     inner_width = max(1, max_width - _QUOTE_PADDING * 2)
-    text_font = _load_card_font(30)
-    text_lines = _quote_text_lines(quote, text_font, inner_width)
-    media_height = _media_section_height(
-        media_previews,
-        inner_width,
-        max_panel_height=_QUOTE_MEDIA_MAX_HEIGHT,
-    )
+    _, body_height = _quote_body_layout(quote, media_previews, inner_width)
     content_height = 60
-    if text_lines:
-        content_height += 14 + len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
-    if media_previews:
-        content_height += 16 + media_height
+    if body_height:
+        content_height += 14 + body_height
     return _QUOTE_PADDING * 2 + content_height
 
 
@@ -1132,25 +1207,30 @@ def _draw_quote_card(
     )
 
     text_font = _load_card_font(30)
-    text_lines = _quote_text_lines(quote, text_font, inner_width)
-    cursor = inner_top + avatar_size
-    if text_lines:
-        cursor += 14
-        for line in text_lines:
-            _draw_card_text(image, draw, (inner_left, cursor), line, text_font, _TEXT)
-            cursor += _QUOTE_TEXT_LINE_HEIGHT
-
-    if quote_media_previews:
-        cursor += 16
-        _draw_media_previews(
-            image,
-            draw,
-            quote_media_previews,
-            cursor,
-            inner_width,
-            origin_x=inner_left,
-            max_panel_height=_QUOTE_MEDIA_MAX_HEIGHT,
-        )
+    text_lines, body_height = _quote_body_layout(quote, quote_media_previews, inner_width)
+    if body_height:
+        body_top = inner_top + avatar_size + 14
+        if quote_media_previews:
+            thumbnail = _render_quote_media_thumbnail(quote_media_previews)
+            thumbnail_mask = Image.new("L", thumbnail.size, 0)
+            ImageDraw.Draw(thumbnail_mask).rounded_rectangle(
+                (0, 0, _QUOTE_MEDIA_SIZE - 1, _QUOTE_MEDIA_SIZE - 1),
+                radius=_QUOTE_MEDIA_RADIUS,
+                fill=255,
+            )
+            image.paste(thumbnail, (inner_left, body_top), thumbnail_mask)
+            draw.rounded_rectangle(
+                (inner_left, body_top, inner_left + _QUOTE_MEDIA_SIZE, body_top + _QUOTE_MEDIA_SIZE),
+                radius=_QUOTE_MEDIA_RADIUS,
+                outline=_BORDER,
+                width=2,
+            )
+            text_left = inner_left + _QUOTE_MEDIA_SIZE + _QUOTE_BODY_GAP
+        else:
+            text_left = inner_left
+        for line_index, line in enumerate(text_lines):
+            text_top = body_top + line_index * _QUOTE_TEXT_LINE_HEIGHT
+            _draw_card_text(image, draw, (text_left, text_top), line, text_font, _TEXT)
 
 
 def _render_tweet_card_sync(
