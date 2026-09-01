@@ -1118,11 +1118,15 @@ def _draw_quote_card(
             width=2,
         )
     quote_handle = quote.author_handle.strip().lstrip("@")
+    quote_subline = f"@{quote_handle}" if quote_handle else "X/Twitter"
+    quote_timestamp = format_tweet_time(quote.created_at)
+    if quote_timestamp:
+        quote_subline = f"{quote_subline} · {quote_timestamp}"
     _draw_card_text(
         image,
         draw,
         (author_left, inner_top + 36),
-        _ellipsize(f"@{quote_handle}" if quote_handle else "X/Twitter", handle_font, inner_width - avatar_size - 16),
+        _ellipsize(quote_subline, handle_font, inner_width - avatar_size - 16),
         handle_font,
         _SECONDARY,
     )
