@@ -319,9 +319,9 @@ async def prepare_media(
     else:
         actual_type = "video" if item.type == "video" else "image"
 
-    if actual_type == "video":
+    if actual_type == "video" and convert_gif:
         has_audio = await _has_audio_stream(data)
-        if convert_gif and (item.type == "animated_gif" or has_audio is False):
+        if item.type == "animated_gif" or has_audio is False:
             gif_data = await _convert_video_to_gif(data, gif_quality)
             if gif_data is not None:
                 return PreparedMedia(data=gif_data, type="animated_gif")
