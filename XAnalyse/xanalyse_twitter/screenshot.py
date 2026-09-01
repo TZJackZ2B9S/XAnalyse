@@ -1283,8 +1283,8 @@ def _render_tweet_card_sync(
     media_top = body_bottom + media_gap
     media_bottom = media_top + media_height
     quote_top = media_bottom + quote_gap
-    divider_y = quote_top + quote_height + 18
-    height = max(520, min(_CARD_MAX_HEIGHT, divider_y + footer_height))
+    footer_top = quote_top + quote_height + 18
+    height = max(520, min(_CARD_MAX_HEIGHT, footer_top + footer_height))
 
     image = Image.new("RGB", (_CARD_WIDTH, height), _BG)
     draw = ImageDraw.Draw(image)
@@ -1342,14 +1342,13 @@ def _render_tweet_card_sync(
             quote_top,
             max_width,
         )
-    draw.line((_CARD_MARGIN, divider_y, _CARD_WIDTH - _CARD_MARGIN, divider_y), fill=_BORDER, width=2)
-    _draw_action_bar(image, draw, tweet, divider_y, max_width, small_font)
+    _draw_action_bar(image, draw, tweet, footer_top, max_width, small_font)
     media_text = _media_summary(tweet)
-    _draw_card_text(image, draw, (_CARD_MARGIN, divider_y + 72), media_text, small_font, _MUTED)
+    _draw_card_text(image, draw, (_CARD_MARGIN, footer_top + 72), media_text, small_font, _MUTED)
     _draw_card_text(
         image,
         draw,
-        (_CARD_MARGIN, divider_y + 112),
+        (_CARD_MARGIN, footer_top + 112),
         _ellipsize(_short_link(link), small_font, max_width),
         small_font,
         _BLUE_DARK,
