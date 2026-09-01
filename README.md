@@ -17,10 +17,10 @@
 
 ## 安装
 
-将仓库目录复制到 GsCore 的 `gsuid_core/plugins/`，目录名保持为 `XAnalyse`：
+在 GsCore 仓库的 `gsuid_core/plugins/` 目录执行：
 
-```text
-gsuid_core/gsuid_core/plugins/XAnalyse/
+```bash
+git clone --depth 1 --single-branch https://github.com/TZJackZ2B9S/XAnalyse.git XAnalyse
 ```
 
 GsCore 会根据 `pyproject.toml` 安装依赖。系统还需要 `ffmpeg` 和 `ffprobe` 才能进行视频/图片洗白及 GIF 判断；找不到时会回退发送 API 返回的原始媒体。
