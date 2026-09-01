@@ -11,6 +11,7 @@
 - 开启 `detectXLinks` 后，普通消息中的 X/Twitter 推文链接会自动解析。
 - `enableScreenshot` 开启时用 Pillow 绘制 X 风格卡片，卡片内嵌媒体预览和有数据的统计图标。
 - `tt` 手动检查订阅；首次检查只建立基线，之后的新推文通过 `gs_subscribe` 推送。
+- X GIF 通常以无音轨 MP4 返回；插件会探测音轨并按 `gifQuality` 合成为 GIF。
 - 视频选择 API 返回的最高码率 MP4，并修正 H.264 BT.709 色域标记。
 - 支持 HTTP 和 SOCKS5 代理；API、媒体、头像和翻译请求共享连接池。
 
@@ -22,8 +23,8 @@
 gsuid_core/gsuid_core/plugins/XAnalyse/
 ```
 
-GsCore 会根据 `pyproject.toml` 安装依赖。系统还需要 `ffmpeg` 才能进行视频/图片洗白；找不到
-ffmpeg 时会回退发送 API 返回的原始媒体。单个媒体响应超过 `maxMediaSize` 会跳过；低于该阈值不会缩放分辨率。
+GsCore 会根据 `pyproject.toml` 安装依赖。系统还需要 `ffmpeg` 和 `ffprobe` 才能进行视频/图片洗白及 GIF 判断；找不到时会回退发送 API 返回的原始媒体。
+单个媒体响应超过 `maxMediaSize` 会跳过；普通图片和视频低于该阈值不会缩放分辨率，GIF 合成尺寸由 `gifQuality` 决定。
 
 ## 配置
 
@@ -35,6 +36,7 @@ ffmpeg 时会回退发送 API 返回的原始媒体。单个媒体响应超过 `
 | `enableScreenshot` | 是否发送 Pillow 推文卡片 |
 | `updateInterval` / `fetchRetries` | 订阅轮询间隔和请求重试次数 |
 | `maxMediaSize` | 单个媒体大小上限，单位 MB；超过后跳过，`0` 表示不限制 |
+| `gifQuality` | 无音轨视频合成 GIF 的质量：`low`、`medium`、`high` |
 | `whe_translate`、`apiKey`、`apiurl`、`model`、`prompt`、`translateRetries` | 可选的 OpenAI 兼容翻译 |
 | `bloggers` | `id` 用户名、`groupID` 群号列表、`blacklist` 屏蔽词 |
 | `outputLogs` / `detectXLinks` | 详细日志和自动链接检测开关 |

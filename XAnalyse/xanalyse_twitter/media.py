@@ -21,6 +21,13 @@ from ..xanalyse_config import XAnalyseSettings
 from ..utils.resource.RESOURCE_PATH import CACHE_PATH
 
 _MEDIA_TIMEOUT = httpx.Timeout(10.0, connect=5.0, pool=3.0)
+_PROBE_TIMEOUT = 8.0
+
+_GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {
+    "low": (10, 480, 128, "bayer:bayer_scale=5"),
+    "medium": (15, 720, 192, "sierra2_4a"),
+    "high": (20, 1080, 256, "sierra2_4a"),
+}
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,51 @@ def is_animated_image_bytes(data: bytes) -> bool:
             return True
         return data[12:16] == b"VP8X" and bool(data[20] & 0x02)
     return False
+
+
+async def _has_audio_stream(data: bytes) -> bool | None:
+    """返回媒体是否包含音轨；探测失败时返回 None。"""
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=nw=1:nk=1",
+            "pipe:0",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(data), timeout=_PROBE_TIMEOUT)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            await process.communicate()
+            logger.debug("[XAnalyse] FFprobe 音轨探测超时")
+            return None
+    except OSError as error:
+        logger.debug(f"[XAnalyse] FFprobe 不可用，跳过 GIF 判断：{error}")
+        return None
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        logger.debug(f"[XAnalyse] FFprobe 音轨探测失败：{detail[-300:]}")
+        return None
+    return bool(stdout.strip())
+
+
+def _gif_quality_options(quality: str) -> tuple[int, int, int, str]:
+    normalized = quality.strip().lower()
+    if normalized not in _GIF_QUALITY_PRESETS:
+        normalized = "medium"
+    return _GIF_QUALITY_PRESETS[normalized]
 
 
 async def _write_file(path: Path, data: bytes) -> None:
@@ -105,6 +157,48 @@ async def _ffmpeg_transform(data: bytes, args: list[str], input_suffix: str, out
     finally:
         await _remove_file(input_path)
         await _remove_file(output_path)
+
+
+async def _convert_video_to_gif(data: bytes, quality: str) -> bytes | None:
+    fps, max_dimension, max_colors, dither = _gif_quality_options(quality)
+    scale = (
+        f"scale=w='min({max_dimension},iw)':h='min({max_dimension},ih)':"
+        "force_original_aspect_ratio=decrease:flags=lanczos"
+    )
+    filter_complex = (
+        f"[0:v]fps={fps},{scale},split[s0][s1];"
+        f"[s0]palettegen=max_colors={max_colors}:stats_mode=diff[p];"
+        f"[s1][p]paletteuse=dither={dither}[v]"
+    )
+    return await _ffmpeg_transform(
+        data,
+        [
+            "ffmpeg",
+            "-y",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+            "-i",
+            "INPUT",
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map_metadata",
+            "-1",
+            "-an",
+            "-loop",
+            "0",
+            "-f",
+            "gif",
+            "OUTPUT",
+        ],
+        ".mp4",
+        ".gif",
+    )
 
 
 async def wash_media(data: bytes, media_type: MediaType) -> bytes:
@@ -195,7 +289,7 @@ async def wash_media(data: bytes, media_type: MediaType) -> bytes:
     return data
 
 
-async def prepare_media(item: MediaItem, data: bytes) -> PreparedMedia:
+async def prepare_media(item: MediaItem, data: bytes, gif_quality: str = "medium") -> PreparedMedia:
     """按文件头纠正媒体类型，并保持媒体原始分辨率。"""
 
     actual_type: MediaType
@@ -205,6 +299,13 @@ async def prepare_media(item: MediaItem, data: bytes) -> PreparedMedia:
         actual_type = "image"
     else:
         actual_type = "video" if item.type == "video" else "image"
+
+    if actual_type == "video":
+        has_audio = await _has_audio_stream(data)
+        if item.type == "animated_gif" or has_audio is False:
+            gif_data = await _convert_video_to_gif(data, gif_quality)
+            if gif_data is not None:
+                return PreparedMedia(data=gif_data, type="animated_gif")
 
     washed_data = await wash_media(data, actual_type)
     return PreparedMedia(data=washed_data, type=actual_type)
@@ -240,7 +341,7 @@ async def download_media(
                 del chunks
             if not data:
                 raise ValueError("媒体响应为空")
-            prepared = await prepare_media(item, data)
+            prepared = await prepare_media(item, data, settings.gif_quality)
             del data
             if max_media_bytes is not None and len(prepared.data) > max_media_bytes:
                 logger.warning(f"[XAnalyse] 处理后媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")

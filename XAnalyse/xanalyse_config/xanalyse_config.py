@@ -46,6 +46,7 @@ class XAnalyseSettings:
     output_logs: bool
     detect_x_links: bool
     proxy: str = ""
+    gif_quality: str = "medium"
 
 
 def _str(name: str) -> str:
@@ -107,6 +108,7 @@ def get_settings() -> XAnalyseSettings:
         update_interval=max(1, _int("updateInterval")),
         fetch_retries=max(1, _int("fetchRetries")),
         max_media_size_mb=max(0, _int("maxMediaSize")),
+        gif_quality=_str("gifQuality").strip().lower(),
         translate_enabled=_bool("whe_translate"),
         api_key=_str("apiKey").strip(),
         api_url=_str("apiurl").strip(),

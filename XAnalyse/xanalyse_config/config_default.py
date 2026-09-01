@@ -48,6 +48,12 @@ CONFIG_DEFAULT: dict[str, GSC] = {
         data=256,
         max_value=4096,
     ),
+    "gifQuality": GsStrConfig(
+        title="GIF 合成质量",
+        desc="无音轨视频按 GIF 处理时的帧率、尺寸和颜色质量。可选 low、medium、high。",
+        data="medium",
+        options=["low", "medium", "high"],
+    ),
     "whe_translate": GsBoolConfig(
         title="启用推文翻译",
         desc="通过 OpenAI 兼容接口翻译推文正文和图片描述。",
