@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import asyncio
 import secrets
 from pathlib import Path
@@ -13,6 +14,7 @@ import aiofiles
 
 from gsuid_core.logger import logger
 from gsuid_core.models import Message
+from gsuid_core.server import on_core_start
 from gsuid_core.segment import MessageSegment
 
 from .api import USER_AGENT
@@ -28,6 +30,18 @@ _GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {
     "medium": (15, 720, 192, "sierra2_4a"),
     "high": (20, 1080, 256, "sierra2_4a"),
 }
+
+
+@on_core_start
+def _check_media_tools() -> None:
+    missing = tuple(tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None)
+    if missing:
+        missing_text = "、".join(missing)
+        logger.warning(
+            f"[XAnalyse] 未找到系统命令：{missing_text}。"
+            "视频/图片洗白、GIF 合成或音轨判断将不可用，但插件仍会正常加载并回退发送原始媒体。"
+            "请在 Core 所在系统或容器安装 ffmpeg（通常同时包含 ffprobe）后重启。"
+        )
 
 
 @dataclass(frozen=True)

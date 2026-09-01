@@ -23,7 +23,16 @@
 git clone --depth 1 --single-branch https://github.com/TZJackZ2B9S/XAnalyse.git XAnalyse
 ```
 
-GsCore 会根据 `pyproject.toml` 安装依赖。系统还需要 `ffmpeg` 和 `ffprobe` 才能进行视频/图片洗白及 GIF 判断；找不到时会回退发送 API 返回的原始媒体。
+GsCore 会根据 `pyproject.toml` 安装依赖。运行 Core 的系统或容器还需要 `ffmpeg` 和 `ffprobe` 才能进行视频/图片洗白及 GIF 判断；插件启动时会检查这两个命令，缺少时仅记录 WARN，不影响插件加载，并回退发送 API 返回的原始媒体。
+
+Debian/Ubuntu 可执行以下命令安装（`ffprobe` 通常随 `ffmpeg` 一起提供）：
+
+```bash
+sudo apt update
+sudo apt install -y ffmpeg
+```
+
+媒体下载内容只在内存中处理；FFmpeg 生成的临时文件会在处理结束后立即删除。
 单个媒体响应超过 `maxMediaSize` 会跳过；普通图片和视频低于该阈值不会缩放分辨率，GIF 合成尺寸由 `gifQuality` 决定。
 
 ## 配置
