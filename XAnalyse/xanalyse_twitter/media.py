@@ -1,0 +1,260 @@
+"""推文媒体下载、FFmpeg 洗白和消息段转换。"""
+
+from __future__ import annotations
+
+import asyncio
+import secrets
+from pathlib import Path
+from datetime import datetime, timezone
+from dataclasses import dataclass
+
+import httpx
+import aiofiles
+
+from gsuid_core.logger import logger
+from gsuid_core.models import Message
+from gsuid_core.segment import MessageSegment
+
+from .api import USER_AGENT
+from .models import MediaItem, MediaType
+from ..xanalyse_config import XAnalyseSettings
+from ..utils.resource.RESOURCE_PATH import CACHE_PATH
+
+_MEDIA_TIMEOUT = httpx.Timeout(10.0, connect=5.0, pool=3.0)
+
+
+@dataclass(frozen=True)
+class PreparedMedia:
+    """已下载并处理好的媒体。"""
+
+    data: bytes
+    type: MediaType
+
+
+def is_gif_bytes(data: bytes) -> bool:
+    return data.startswith((b"GIF87a", b"GIF89a"))
+
+
+def is_mp4_bytes(data: bytes) -> bool:
+    return len(data) >= 12 and b"ftyp" in data[:32]
+
+
+def is_image_bytes(data: bytes) -> bool:
+    return (
+        data.startswith(b"\xff\xd8\xff")
+        or data.startswith(b"\x89PNG\r\n\x1a\n")
+        or is_gif_bytes(data)
+        or (len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP")
+    )
+
+
+def is_animated_image_bytes(data: bytes) -> bool:
+    """识别常见动图容器。"""
+
+    if is_gif_bytes(data):
+        return True
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return b"acTL" in data
+    if len(data) >= 21 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        if b"ANIM" in data:
+            return True
+        return data[12:16] == b"VP8X" and bool(data[20] & 0x02)
+    return False
+
+
+async def _write_file(path: Path, data: bytes) -> None:
+    async with aiofiles.open(path, "wb") as file:
+        await file.write(data)
+
+
+async def _read_file(path: Path) -> bytes:
+    async with aiofiles.open(path, "rb") as file:
+        return await file.read()
+
+
+async def _remove_file(path: Path) -> None:
+    try:
+        await asyncio.to_thread(path.unlink)
+    except FileNotFoundError:
+        return
+
+
+async def _ffmpeg_transform(data: bytes, args: list[str], input_suffix: str, output_suffix: str) -> bytes | None:
+    token = secrets.token_hex(8)
+    input_path = CACHE_PATH / f"xanalyse_input_{token}{input_suffix}"
+    output_path = CACHE_PATH / f"xanalyse_output_{token}{output_suffix}"
+    await _write_file(input_path, data)
+    try:
+        resolved_args = [
+            str(input_path) if arg == "INPUT" else str(output_path) if arg == "OUTPUT" else arg for arg in args
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *resolved_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            logger.debug(f"[XAnalyse] FFmpeg 处理失败：{detail[-300:]}")
+            return None
+        return await _read_file(output_path)
+    except OSError as error:
+        logger.debug(f"[XAnalyse] FFmpeg 不可用，跳过媒体处理：{error}")
+        return None
+    finally:
+        await _remove_file(input_path)
+        await _remove_file(output_path)
+
+
+async def wash_media(data: bytes, media_type: MediaType) -> bytes:
+    """在不改变分辨率的前提下洗白媒体。"""
+
+    if media_type == "video" and is_mp4_bytes(data):
+        result = await _ffmpeg_transform(
+            data,
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                "INPUT",
+                "-map_metadata",
+                "-1",
+                "-metadata",
+                f"creation_time={datetime.now(timezone.utc).isoformat()}",
+                "-c",
+                "copy",
+                "-bsf:v",
+                "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1",
+                "OUTPUT",
+            ],
+            ".mp4",
+            ".mp4",
+        )
+        return result or data
+    if media_type == "image" and not is_animated_image_bytes(data) and is_image_bytes(data):
+        if data.startswith(b"\xff\xd8\xff"):
+            args = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                "INPUT",
+                "-map_metadata",
+                "-1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "mjpeg",
+                "-q:v",
+                "1",
+                "-pix_fmt",
+                "yuvj444p",
+                "OUTPUT",
+            ]
+            output_suffix = ".jpg"
+        elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+            args = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                "INPUT",
+                "-map_metadata",
+                "-1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                "-compression_level",
+                "9",
+                "-pred",
+                "mixed",
+                "OUTPUT",
+            ]
+            output_suffix = ".png"
+        else:
+            args = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                "INPUT",
+                "-map_metadata",
+                "-1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "libwebp",
+                "-lossless",
+                "1",
+                "-q:v",
+                "100",
+                "OUTPUT",
+            ]
+            output_suffix = ".webp"
+        result = await _ffmpeg_transform(data, args, ".img", output_suffix)
+        return result or data
+    return data
+
+
+async def prepare_media(item: MediaItem, data: bytes) -> PreparedMedia:
+    """按文件头纠正媒体类型，并保持媒体原始分辨率。"""
+
+    actual_type: MediaType
+    if is_mp4_bytes(data):
+        actual_type = "video"
+    elif is_image_bytes(data):
+        actual_type = "image"
+    else:
+        actual_type = "video" if item.type == "video" else "image"
+
+    washed_data = await wash_media(data, actual_type)
+    return PreparedMedia(data=washed_data, type=actual_type)
+
+
+async def download_media(
+    client: httpx.AsyncClient,
+    item: MediaItem,
+    settings: XAnalyseSettings,
+) -> PreparedMedia | None:
+    headers = {"User-Agent": USER_AGENT}
+    max_media_bytes = settings.max_media_size_mb * 1024 * 1024 if settings.max_media_size_mb > 0 else None
+    for attempt in range(settings.fetch_retries):
+        try:
+            async with client.stream("GET", item.url, headers=headers, timeout=_MEDIA_TIMEOUT) as response:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if (
+                    max_media_bytes is not None
+                    and content_length is not None
+                    and content_length.isdigit()
+                    and int(content_length) > max_media_bytes
+                ):
+                    logger.warning(f"[XAnalyse] 媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")
+                    return None
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if max_media_bytes is not None and len(chunks) + len(chunk) > max_media_bytes:
+                        logger.warning(f"[XAnalyse] 媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")
+                        return None
+                    chunks.extend(chunk)
+                data = bytes(chunks)
+                del chunks
+            if not data:
+                raise ValueError("媒体响应为空")
+            prepared = await prepare_media(item, data)
+            del data
+            if max_media_bytes is not None and len(prepared.data) > max_media_bytes:
+                logger.warning(f"[XAnalyse] 处理后媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")
+                return None
+            return prepared
+        except (httpx.HTTPError, ValueError, OSError) as error:
+            if attempt + 1 >= settings.fetch_retries:
+                logger.warning(f"[XAnalyse] 媒体下载失败：{item.url}：{error}")
+                return None
+            await asyncio.sleep(min(float(attempt + 1), 5.0))
+    return None
+
+
+def media_to_message(media: PreparedMedia) -> Message:
+    if media.type == "video":
+        return MessageSegment.video(media.data)
+    return MessageSegment.image(media.data)

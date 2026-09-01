@@ -1,0 +1,12 @@
+line-length = 120
+target-version = "py311"
+exclude = [".git", ".venv", "__pycache__", "build", "dist", "**/*.toml"]
+
+[lint]
+select = ["E", "F", "I", "W"]
+
+[lint.isort]
+combine-as-imports = true
+length-sort = true
+known-first-party = ["gsuid_core", "XAnalyse"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]

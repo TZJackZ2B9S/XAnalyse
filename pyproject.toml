@@ -1,0 +1,13 @@
+[project]
+name = "gscore-xanalyse"
+version = "0.1.0"
+description = "GsCore X/Twitter 推文解析与媒体转发插件"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.26.0",
+    "socksio>=1.0.0",
+    "aiofiles>=23.0.0",
+    "pillow>=10.2.0",
+]
