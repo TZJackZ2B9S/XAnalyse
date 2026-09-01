@@ -45,7 +45,8 @@ sudo apt install -y ffmpeg
 | `enableScreenshot` | 是否发送 Pillow 推文卡片 |
 | `updateInterval` / `fetchRetries` | 订阅轮询间隔和请求重试次数 |
 | `maxMediaSize` | 单个媒体大小上限，单位 MB；超过后跳过，`0` 表示不限制 |
-| `gifQuality` | 无音轨视频合成 GIF 的质量：`low`、`medium`、`high` |
+| `convertGif` | 是否将无音轨视频转换为 GIF；关闭时洗白后按视频发送 |
+| `gifQuality` | 无音轨视频合成 GIF 的质量：`low`、`medium`、`high`（仅 `convertGif` 开启时生效） |
 | `whe_translate`、`apiKey`、`apiurl`、`model`、`prompt`、`translateRetries` | 可选的 OpenAI 兼容翻译 |
 | `bloggers` | `id` 用户名、`groupID` 群号列表、`blacklist` 屏蔽词 |
 | `outputLogs` / `detectXLinks` | 详细日志和自动链接检测开关 |

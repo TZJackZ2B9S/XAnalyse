@@ -303,7 +303,12 @@ async def wash_media(data: bytes, media_type: MediaType) -> bytes:
     return data
 
 
-async def prepare_media(item: MediaItem, data: bytes, gif_quality: str = "medium") -> PreparedMedia:
+async def prepare_media(
+    item: MediaItem,
+    data: bytes,
+    gif_quality: str = "medium",
+    convert_gif: bool = True,
+) -> PreparedMedia:
     """按文件头纠正媒体类型，并保持媒体原始分辨率。"""
 
     actual_type: MediaType
@@ -316,7 +321,7 @@ async def prepare_media(item: MediaItem, data: bytes, gif_quality: str = "medium
 
     if actual_type == "video":
         has_audio = await _has_audio_stream(data)
-        if item.type == "animated_gif" or has_audio is False:
+        if convert_gif and (item.type == "animated_gif" or has_audio is False):
             gif_data = await _convert_video_to_gif(data, gif_quality)
             if gif_data is not None:
                 return PreparedMedia(data=gif_data, type="animated_gif")
@@ -355,7 +360,7 @@ async def download_media(
                 del chunks
             if not data:
                 raise ValueError("媒体响应为空")
-            prepared = await prepare_media(item, data, settings.gif_quality)
+            prepared = await prepare_media(item, data, settings.gif_quality, settings.convert_gif)
             del data
             if max_media_bytes is not None and len(prepared.data) > max_media_bytes:
                 logger.warning(f"[XAnalyse] 处理后媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")

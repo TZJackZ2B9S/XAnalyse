@@ -47,6 +47,7 @@ class XAnalyseSettings:
     detect_x_links: bool
     proxy: str = ""
     gif_quality: str = "medium"
+    convert_gif: bool = True
 
 
 def _str(name: str) -> str:
@@ -119,4 +120,5 @@ def get_settings() -> XAnalyseSettings:
         output_logs=_bool("outputLogs"),
         detect_x_links=_bool("detectXLinks"),
         proxy=_str("proxy").strip(),
+        convert_gif=_bool("convertGif"),
     )
