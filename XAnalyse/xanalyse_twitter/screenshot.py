@@ -738,7 +738,10 @@ def _mixed_media_layout(
     )
     section_height = max(left_height, right_height)
     slots: list[_MediaSlot] = []
-    current_top = section_height - left_height
+    # 默认顶边对齐；高度只差一个媒体间距时，允许短列轻微下移，让底边也更协调。
+    left_top = min(_MEDIA_GAP, max(0, right_height - left_height))
+    right_top = min(_MEDIA_GAP, max(0, left_height - right_height))
+    current_top = left_top
     for index, (_width, height) in zip(range(selected.split), selected.left_dimensions, strict=True):
         slots.append(
             _MediaSlot(
@@ -750,7 +753,7 @@ def _mixed_media_layout(
             )
         )
         current_top += height + _MEDIA_GAP
-    current_top = section_height - right_height
+    current_top = right_top
     for index, (_width, height) in zip(range(selected.split, media_count), selected.right_dimensions, strict=True):
         slots.append(
             _MediaSlot(
