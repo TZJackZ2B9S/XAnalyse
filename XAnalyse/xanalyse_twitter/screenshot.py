@@ -48,6 +48,20 @@ class _MediaSlot:
     height: int
 
 
+@dataclass(frozen=True)
+class _MixedLayoutCandidate:
+    """混合媒体双列布局的候选方案。"""
+
+    balance_error: float
+    min_area: int
+    total_area: int
+    section_height: int
+    split: int
+    left_width: int
+    left_dimensions: tuple[tuple[int, int], ...]
+    right_dimensions: tuple[tuple[int, int], ...]
+
+
 _CARD_WIDTH = 1_080
 _CARD_MARGIN = 64
 _CARD_MAX_HEIGHT = 3_000
@@ -75,6 +89,11 @@ _QUOTE_MEDIA_SIZE = 192
 _QUOTE_MEDIA_GAP = 4
 _QUOTE_MEDIA_RADIUS = 18
 _QUOTE_BODY_GAP = 16
+_PORTRAIT_ASPECT_LIMIT = 1.0
+_VERY_WIDE_ASPECT = 2.0
+_MIXED_MIN_COLUMN_WIDTH = 220
+_MIXED_SEARCH_STEP = 4
+_MIXED_BALANCE_TOLERANCE = 0.05
 
 _BG = (247, 249, 250)
 _WHITE = (255, 255, 255)
@@ -503,18 +522,29 @@ def _preview_aspect(preview: MediaPreview) -> float | None:
     return aspect if aspect is not None and aspect > 0 else None
 
 
-def _is_vertical_mosaic(previews: tuple[MediaPreview, ...]) -> bool:
-    """判断 3/4 张媒体是否适合 X 风格的“皿”形排版。"""
+def _is_portrait_media(preview: MediaPreview) -> bool:
+    aspect = _preview_aspect(preview)
+    return aspect is not None and aspect < _PORTRAIT_ASPECT_LIMIT
 
-    if len(previews) not in {3, 4}:
-        return False
-    aspects = tuple(_preview_aspect(preview) for preview in previews)
-    if any(aspect is None or aspect > 0.85 for aspect in aspects):
-        return False
-    valid_aspects = tuple(aspect for aspect in aspects if aspect is not None)
-    if not valid_aspects:
-        return False
-    return max(valid_aspects) / min(valid_aspects) <= 1.18
+
+def _is_landscape_media(preview: MediaPreview) -> bool:
+    aspect = _preview_aspect(preview)
+    return aspect is not None and aspect > _PORTRAIT_ASPECT_LIMIT
+
+
+def _is_very_wide_media(preview: MediaPreview) -> bool:
+    aspect = _preview_aspect(preview)
+    return aspect is not None and aspect >= _VERY_WIDE_ASPECT
+
+
+def _all_portrait_media(previews: tuple[MediaPreview, ...]) -> bool:
+    return bool(previews) and all(_is_portrait_media(preview) for preview in previews)
+
+
+def _has_mixed_orientation(previews: tuple[MediaPreview, ...]) -> bool:
+    return any(_is_portrait_media(preview) for preview in previews) and any(
+        _is_landscape_media(preview) for preview in previews
+    )
 
 
 def _media_panel_size_for_width(
@@ -532,6 +562,11 @@ def _media_panel_size_for_width(
     min_height = _SINGLE_MEDIA_MIN_HEIGHT if single else _MULTI_MEDIA_MIN_HEIGHT
     if max_panel_height is not None:
         max_height = min(max_height, max_panel_height)
+        # A section-level height budget can be smaller than the normal tile
+        # minimum (for example, several very tall media items in two columns).
+        # Keep the upper bound authoritative instead of letting the minimum
+        # height make the whole card overflow.
+        min_height = min(min_height, max_height)
     panel_height = round(panel_width / aspect)
     if panel_height > max_height:
         panel_height = max_height
@@ -541,15 +576,288 @@ def _media_panel_size_for_width(
 
 
 def _media_rows(previews: tuple[MediaPreview, ...]) -> tuple[tuple[int, ...], ...]:
-    if _is_vertical_mosaic(previews):
-        # 3/4 张相近竖图横向并排，一行铺满内容区，避免退化成“田”字网格。
-        return (tuple(range(len(previews))),)
     if len(previews) == 1:
         return ((0,),)
     return tuple(tuple(range(start, min(start + 2, len(previews)))) for start in range(0, len(previews), 2))
 
 
-def _media_layout(
+def _proportional_widths(aspects: tuple[float, ...], total_width: int) -> tuple[int, ...]:
+    if not aspects or total_width <= 0:
+        return ()
+    aspect_total = sum(aspects)
+    raw_widths = tuple(total_width * aspect / aspect_total for aspect in aspects)
+    widths = [max(1, math.floor(width)) for width in raw_widths]
+    remaining = total_width - sum(widths)
+    if remaining > 0:
+        order = sorted(
+            range(len(widths)),
+            key=lambda index: raw_widths[index] - math.floor(raw_widths[index]),
+            reverse=True,
+        )
+        for index in range(remaining):
+            widths[order[index % len(order)]] += 1
+    elif remaining < 0:
+        order = sorted(range(len(widths)), key=lambda index: widths[index], reverse=True)
+        for index in range(-remaining):
+            target = order[index % len(order)]
+            if widths[target] > 1:
+                widths[target] -= 1
+    return tuple(widths)
+
+
+def _portrait_media_layout(
+    previews: tuple[MediaPreview, ...],
+    max_width: int,
+    *,
+    max_panel_height: int | None = None,
+) -> tuple[tuple[_MediaSlot, ...], int]:
+    """将所有竖图按共同高度横向排列，并按原始比例分配宽度。"""
+
+    aspects = tuple(_preview_aspect(preview) for preview in previews)
+    if any(aspect is None for aspect in aspects):
+        return (), 0
+    valid_aspects = tuple(aspect for aspect in aspects if aspect is not None)
+    available_width = max(1, max_width - _MEDIA_GAP * (len(previews) - 1))
+    common_height = available_width / sum(valid_aspects)
+    max_height = _MULTI_MEDIA_MAX_HEIGHT
+    if max_panel_height is not None:
+        max_height = min(max_height, max_panel_height)
+    common_height = max(1.0, min(common_height, max_height))
+    target_width = min(available_width, max(len(previews), round(common_height * sum(valid_aspects))))
+    widths = _proportional_widths(valid_aspects, target_width)
+    height = max(1, round(common_height))
+    row_width = sum(widths) + _MEDIA_GAP * (len(widths) - 1)
+    row_left = max(0, (max_width - row_width) // 2)
+    slots: list[_MediaSlot] = []
+    column_left = row_left
+    for index, width in enumerate(widths):
+        slots.append(_MediaSlot(index=index, left=column_left, top=0, width=width, height=height))
+        column_left += width + _MEDIA_GAP
+    return tuple(slots), height
+
+
+def _stack_dimensions(
+    previews: tuple[MediaPreview, ...],
+    indices: tuple[int, ...],
+    width: int,
+    *,
+    max_panel_height: int | None = None,
+) -> tuple[tuple[tuple[int, int], ...], int]:
+    item_max_height = max_panel_height
+    if max_panel_height is not None and indices:
+        available_height = max_panel_height - _MEDIA_GAP * (len(indices) - 1)
+        item_max_height = max(1, available_height // len(indices))
+    dimensions = tuple(
+        _media_panel_size_for_width(
+            previews[index],
+            width,
+            single=False,
+            max_panel_height=item_max_height,
+        )
+        for index in indices
+    )
+    height = sum(panel_height for _panel_width, panel_height in dimensions)
+    height += _MEDIA_GAP * max(0, len(dimensions) - 1)
+    return dimensions, height
+
+
+def _mixed_candidate_key(candidate: _MixedLayoutCandidate) -> tuple[int, int, int, int, int]:
+    return (
+        candidate.min_area,
+        candidate.total_area,
+        -candidate.section_height,
+        -candidate.split,
+        -candidate.left_width,
+    )
+
+
+def _mixed_media_layout(
+    previews: tuple[MediaPreview, ...],
+    max_width: int,
+    *,
+    max_panel_height: int | None = None,
+) -> tuple[tuple[_MediaSlot, ...], int]:
+    """把混合横竖图分成两列堆叠，搜索较平衡且不浪费面积的分割。"""
+
+    media_count = len(previews)
+    available_width = max_width - _MEDIA_GAP
+    min_column_width = min(_MIXED_MIN_COLUMN_WIDTH, max(1, available_width // 2))
+    max_column_width = max(min_column_width, available_width - min_column_width)
+    candidates: list[_MixedLayoutCandidate] = []
+    for split in range(1, media_count):
+        left_indices = tuple(range(split))
+        right_indices = tuple(range(split, media_count))
+        widths = list(range(min_column_width, max_column_width + 1, _MIXED_SEARCH_STEP))
+        if max_column_width not in widths:
+            widths.append(max_column_width)
+        for left_width in widths:
+            right_width = available_width - left_width
+            if right_width < min_column_width:
+                continue
+            left_dimensions, left_height = _stack_dimensions(
+                previews,
+                left_indices,
+                left_width,
+                max_panel_height=max_panel_height,
+            )
+            right_dimensions, right_height = _stack_dimensions(
+                previews,
+                right_indices,
+                right_width,
+                max_panel_height=max_panel_height,
+            )
+            section_height = max(left_height, right_height)
+            balance_error = abs(left_height - right_height) / max(1, section_height)
+            areas = tuple(width * height for width, height in left_dimensions + right_dimensions)
+            candidates.append(
+                _MixedLayoutCandidate(
+                    balance_error=balance_error,
+                    min_area=min(areas),
+                    total_area=sum(areas),
+                    section_height=section_height,
+                    split=split,
+                    left_width=left_width,
+                    left_dimensions=left_dimensions,
+                    right_dimensions=right_dimensions,
+                )
+            )
+
+    if not candidates:
+        return (), 0
+    best_balance = min(candidate.balance_error for candidate in candidates)
+    eligible = [
+        candidate for candidate in candidates if candidate.balance_error <= best_balance + _MIXED_BALANCE_TOLERANCE
+    ]
+    selected = max(eligible, key=_mixed_candidate_key)
+    right_width = available_width - selected.left_width
+    left_height = sum(height for _width, height in selected.left_dimensions) + _MEDIA_GAP * max(
+        0, len(selected.left_dimensions) - 1
+    )
+    right_height = sum(height for _width, height in selected.right_dimensions) + _MEDIA_GAP * max(
+        0, len(selected.right_dimensions) - 1
+    )
+    section_height = max(left_height, right_height)
+    slots: list[_MediaSlot] = []
+    current_top = section_height - left_height
+    for index, (_width, height) in zip(range(selected.split), selected.left_dimensions, strict=True):
+        slots.append(
+            _MediaSlot(
+                index=index,
+                left=0,
+                top=current_top,
+                width=selected.left_width,
+                height=height,
+            )
+        )
+        current_top += height + _MEDIA_GAP
+    current_top = section_height - right_height
+    for index, (_width, height) in zip(range(selected.split, media_count), selected.right_dimensions, strict=True):
+        slots.append(
+            _MediaSlot(
+                index=index,
+                left=selected.left_width + _MEDIA_GAP,
+                top=current_top,
+                width=right_width,
+                height=height,
+            )
+        )
+        current_top += height + _MEDIA_GAP
+    return tuple(slots), section_height
+
+
+def _standalone_wide_layout(
+    previews: tuple[MediaPreview, ...],
+    max_width: int,
+    *,
+    max_panel_height: int | None = None,
+) -> tuple[tuple[_MediaSlot, ...], int]:
+    """将超宽横图独立成行，其余媒体按原顺序分块布局。"""
+
+    blocks: list[tuple[bool, tuple[int, ...]]] = []
+    normal_indices: list[int] = []
+    for index, preview in enumerate(previews):
+        if _is_very_wide_media(preview):
+            if normal_indices:
+                blocks.append((False, tuple(normal_indices)))
+                normal_indices.clear()
+            blocks.append((True, (index,)))
+        else:
+            normal_indices.append(index)
+    if normal_indices:
+        blocks.append((False, tuple(normal_indices)))
+
+    slots: list[_MediaSlot] = []
+    row_top = 0
+    for standalone, indices in blocks:
+        if standalone:
+            index = indices[0]
+            width, height = _media_panel_size_for_width(
+                previews[index],
+                max_width,
+                single=True,
+                max_panel_height=max_panel_height,
+            )
+            block_slots = (_MediaSlot(index=index, left=0, top=0, width=width, height=height),)
+            block_height = height
+        else:
+            subset = tuple(previews[index] for index in indices)
+            relative_slots, block_height = _media_layout(
+                subset,
+                max_width,
+                max_panel_height=max_panel_height,
+            )
+            block_slots = tuple(
+                _MediaSlot(
+                    index=indices[slot.index],
+                    left=slot.left,
+                    top=slot.top,
+                    width=slot.width,
+                    height=slot.height,
+                )
+                for slot in relative_slots
+            )
+        slots.extend(
+            _MediaSlot(
+                index=slot.index,
+                left=slot.left,
+                top=row_top + slot.top,
+                width=slot.width,
+                height=slot.height,
+            )
+            for slot in block_slots
+        )
+        row_top += block_height + _MEDIA_GAP
+    return tuple(slots), max(0, row_top - _MEDIA_GAP)
+
+
+def _fit_media_layout_height(
+    slots: tuple[_MediaSlot, ...],
+    section_height: int,
+    max_height: int | None,
+) -> tuple[tuple[_MediaSlot, ...], int]:
+    """在卡片剩余空间不足时压缩媒体区，避免底部内容被裁切。"""
+
+    if not slots or max_height is None or section_height <= max_height:
+        return slots, section_height
+
+    scale = max_height / section_height
+    fitted: list[_MediaSlot] = []
+    for slot in slots:
+        top = round(slot.top * scale)
+        bottom = max(top + 1, round((slot.top + slot.height) * scale))
+        fitted.append(
+            _MediaSlot(
+                index=slot.index,
+                left=slot.left,
+                top=top,
+                width=slot.width,
+                height=bottom - top,
+            )
+        )
+    return tuple(fitted), max_height
+
+
+def _legacy_media_layout(
     previews: tuple[MediaPreview, ...],
     max_width: int,
     *,
@@ -561,12 +869,11 @@ def _media_layout(
         return (), 0
 
     rows = _media_rows(previews)
-    mosaic = _is_vertical_mosaic(previews)
     slots: list[_MediaSlot] = []
     row_top = 0
     for row_indices in rows:
         column_count = len(row_indices)
-        full_width = mosaic or len(previews) == 1 or column_count > 1
+        full_width = len(previews) == 1 or column_count > 1
         if full_width:
             available_width = max_width
             gap_count = column_count - 1
@@ -596,7 +903,7 @@ def _media_layout(
                 _MediaSlot(
                     index=index,
                     left=column_left,
-                    top=row_top,
+                    top=row_top + row_height - panel_height,
                     width=_panel_width,
                     height=panel_height,
                 )
@@ -605,6 +912,47 @@ def _media_layout(
         row_top += row_height + _MEDIA_GAP
 
     return tuple(slots), max(0, row_top - _MEDIA_GAP)
+
+
+def _media_layout(
+    previews: tuple[MediaPreview, ...],
+    max_width: int,
+    *,
+    max_panel_height: int | None = None,
+) -> tuple[tuple[_MediaSlot, ...], int]:
+    if not previews:
+        return (), 0
+    if len(previews) == 1:
+        slots, section_height = _legacy_media_layout(
+            previews,
+            max_width,
+            max_panel_height=max_panel_height,
+        )
+    elif _all_portrait_media(previews):
+        slots, section_height = _portrait_media_layout(
+            previews,
+            max_width,
+            max_panel_height=max_panel_height,
+        )
+    elif len(previews) > 2 and any(_is_very_wide_media(preview) for preview in previews):
+        slots, section_height = _standalone_wide_layout(
+            previews,
+            max_width,
+            max_panel_height=max_panel_height,
+        )
+    elif len(previews) > 2 and _has_mixed_orientation(previews):
+        slots, section_height = _mixed_media_layout(
+            previews,
+            max_width,
+            max_panel_height=max_panel_height,
+        )
+    else:
+        slots, section_height = _legacy_media_layout(
+            previews,
+            max_width,
+            max_panel_height=max_panel_height,
+        )
+    return _fit_media_layout_height(slots, section_height, max_panel_height)
 
 
 def _media_section_height(
