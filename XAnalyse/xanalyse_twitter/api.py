@@ -25,9 +25,17 @@ USER_AGENT = (
 
 
 def _error_detail(error: BaseException) -> str:
-    """异常文本为空时回退到类型名，避免日志只显示一个空冒号。"""
+    """优先提取异常和链式异常文本，最后回退到类型名。"""
 
     detail = str(error).strip()
+    if not detail:
+        for chained in (error.__cause__, error.__context__):
+            if chained is None:
+                continue
+            chained_detail = str(chained).strip()
+            if chained_detail:
+                detail = chained_detail
+                break
     error_type = error.__class__.__name__
     if not detail:
         return error_type
