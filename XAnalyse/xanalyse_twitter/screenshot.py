@@ -1043,8 +1043,13 @@ def _quote_text_lines(quote: TweetData, text_font: ImageFont.FreeTypeFont, max_w
     )
 
 
-def _quote_text_width(media_previews: tuple[MediaPreview, ...], inner_width: int) -> int:
-    if not media_previews:
+def _quote_text_width(
+    media_previews: tuple[MediaPreview, ...],
+    inner_width: int,
+    *,
+    compact_media: bool,
+) -> int:
+    if not media_previews or not compact_media:
         return inner_width
     return max(1, inner_width - _QUOTE_MEDIA_SIZE - _QUOTE_BODY_GAP)
 
@@ -1053,13 +1058,23 @@ def _quote_body_layout(
     quote: TweetData,
     media_previews: tuple[MediaPreview, ...],
     inner_width: int,
+    media_width: int,
+    *,
+    compact_media: bool,
 ) -> tuple[list[str], int]:
     text_font = _load_card_font(30)
-    text_width = _quote_text_width(media_previews, inner_width)
+    text_width = _quote_text_width(media_previews, inner_width, compact_media=compact_media)
     text_lines = _quote_text_lines(quote, text_font, text_width)
     text_height = len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
-    media_height = _QUOTE_MEDIA_SIZE if media_previews else 0
-    return text_lines, max(text_height, media_height)
+    if not media_previews:
+        return text_lines, text_height
+    media_height = _QUOTE_MEDIA_SIZE if compact_media else _media_section_height(media_previews, media_width)
+    if compact_media:
+        return text_lines, max(text_height, media_height)
+    if text_height:
+        text_height += 14
+    media_height += text_height
+    return text_lines, media_height
 
 
 def _quote_media_cells(count: int, size: int) -> tuple[tuple[int, int, int, int, int], ...]:
@@ -1108,19 +1123,64 @@ def _render_quote_media_thumbnail(previews: tuple[MediaPreview, ...]) -> Image.I
     return thumbnail
 
 
+def _draw_full_width_quote_media(
+    image: Image.Image,
+    previews: tuple[MediaPreview, ...],
+    top: int,
+    left: int,
+    max_width: int,
+) -> None:
+    """在无外层媒体时，把引用推文媒体铺满引用卡片。"""
+
+    slots, _section_height = _media_layout(previews, max_width)
+    for slot in slots:
+        preview = previews[slot.index]
+        panel = _render_media_tile(
+            preview,
+            (slot.width, slot.height),
+            round_image=False,
+        )
+        mask = Image.new("L", (slot.width, slot.height), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        radius = max(1, min(_MEDIA_RADIUS, slot.width // 2, slot.height // 2))
+        mask_draw.rounded_rectangle(
+            (0, 0, slot.width - 1, slot.height - 1),
+            radius=radius,
+            fill=255,
+        )
+        mask_draw.rectangle((0, 0, slot.width - 1, radius), fill=255)
+        mask_draw.rectangle((0, 0, radius, slot.height - radius - 1), fill=255)
+        mask_draw.rectangle(
+            (slot.width - radius - 1, 0, slot.width - 1, slot.height - radius - 1),
+            fill=255,
+        )
+        image.paste(panel, (left + slot.left, top + slot.top), mask)
+
+
 def _quote_section_height(
     quote: TweetData | None,
     media_previews: tuple[MediaPreview, ...],
     max_width: int,
+    *,
+    compact_media: bool,
 ) -> int:
     if quote is None:
         return 0
     inner_width = max(1, max_width - _QUOTE_PADDING * 2)
-    _, body_height = _quote_body_layout(quote, media_previews, inner_width)
+    _, body_height = _quote_body_layout(
+        quote,
+        media_previews,
+        inner_width,
+        max_width,
+        compact_media=compact_media,
+    )
     content_height = 60
     if body_height:
         content_height += 14 + body_height
-    return _QUOTE_PADDING * 2 + content_height
+    bottom_padding = _QUOTE_PADDING
+    if media_previews and not compact_media:
+        bottom_padding = 0
+    return _QUOTE_PADDING + content_height + bottom_padding
 
 
 def _draw_avatar(
@@ -1159,10 +1219,17 @@ def _draw_quote_card(
     quote_media_previews: tuple[MediaPreview, ...],
     top: int,
     max_width: int,
+    *,
+    compact_media: bool,
 ) -> None:
     """绘制接近 X 原生样式的嵌套引用推文。"""
 
-    quote_height = _quote_section_height(quote, quote_media_previews, max_width)
+    quote_height = _quote_section_height(
+        quote,
+        quote_media_previews,
+        max_width,
+        compact_media=compact_media,
+    )
     left = _CARD_MARGIN
     draw.rounded_rectangle(
         (left, top, left + max_width, top + quote_height),
@@ -1207,9 +1274,30 @@ def _draw_quote_card(
     )
 
     text_font = _load_card_font(30)
-    text_lines, body_height = _quote_body_layout(quote, quote_media_previews, inner_width)
+    text_lines, body_height = _quote_body_layout(
+        quote,
+        quote_media_previews,
+        inner_width,
+        max_width,
+        compact_media=compact_media,
+    )
     if body_height:
         body_top = inner_top + avatar_size + 14
+        if quote_media_previews and not compact_media:
+            for line_index, line in enumerate(text_lines):
+                text_top = body_top + line_index * _QUOTE_TEXT_LINE_HEIGHT
+                _draw_card_text(image, draw, (inner_left, text_top), line, text_font, _TEXT)
+            media_top = body_top + len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
+            if text_lines:
+                media_top += 14
+            _draw_full_width_quote_media(image, quote_media_previews, media_top, left, max_width)
+            draw.rounded_rectangle(
+                (left, top, left + max_width, top + quote_height),
+                radius=22,
+                outline=_BORDER,
+                width=2,
+            )
+            return
         if quote_media_previews:
             thumbnail = _render_quote_media_thumbnail(quote_media_previews)
             thumbnail_mask = Image.new("L", thumbnail.size, 0)
@@ -1255,7 +1343,13 @@ def _render_tweet_card_sync(
     author = tweet.author_name.strip() or "未知用户"
     footer_height = 190
     media_gap = 18 if media_previews else 0
-    quote_height = _quote_section_height(tweet.quote, quote_media_previews, max_width)
+    compact_quote_media = bool(tweet.media)
+    quote_height = _quote_section_height(
+        tweet.quote,
+        quote_media_previews,
+        max_width,
+        compact_media=compact_quote_media,
+    )
     quote_gap = 18 if tweet.quote is not None else 0
     outer_media_max_height = _SINGLE_MEDIA_MAX_HEIGHT
     if tweet.quote is not None:
@@ -1341,6 +1435,7 @@ def _render_tweet_card_sync(
             quote_media_previews,
             quote_top,
             max_width,
+            compact_media=compact_quote_media,
         )
     _draw_action_bar(image, draw, tweet, footer_top, max_width, small_font)
     media_text = _media_summary(tweet)
