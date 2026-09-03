@@ -102,7 +102,9 @@ _RESERVED_PROFILE_HANDLES = frozenset(
         "tos",
     }
 )
-_API_TIMEOUT = httpx.Timeout(8.0, connect=5.0, pool=3.0)
+# FxTwitter 偶尔会在代理切换节点时重置连接。连接超时只影响失败请求，
+# 正常响应仍按实际耗时返回；较长的 pool 超时避免被媒体预览短暂占满时误报失败。
+_API_TIMEOUT = httpx.Timeout(12.0, connect=8.0, pool=8.0)
 _LINK_RE = re.compile(
     r"(?:https?://)?(?:www\.|mobile\.)?(?:x|twitter)\.com/[^/\s'\"<>]+/status/\d+(?![A-Za-z0-9_])"
     r"(?:[/?#][^\s'\"<>,!?;:，。？！；：、]*)?"
@@ -257,27 +259,25 @@ def build_http_client(proxy: str, timeout: float = 10.0) -> httpx.AsyncClient:
     timeout_config = httpx.Timeout(
         timeout,
         connect=min(timeout, 10.0),
-        pool=min(timeout, 5.0),
+        pool=min(timeout, 8.0),
     )
     limits = httpx.Limits(
         max_connections=8,
         max_keepalive_connections=4,
-        keepalive_expiry=30.0,
+        # 代理软件切换节点后可能主动关闭空闲连接，缩短复用时间可避免复用陈旧连接。
+        keepalive_expiry=10.0,
     )
 
-    if proxy:
-        return httpx.AsyncClient(
-            proxy=proxy,
-            follow_redirects=True,
-            timeout=timeout_config,
-            limits=limits,
-            headers={"User-Agent": USER_AGENT},
-            trust_env=False,
-        )
+    transport = httpx.AsyncHTTPTransport(
+        proxy=proxy or None,
+        retries=1,
+        limits=limits,
+        trust_env=False,
+    )
     return httpx.AsyncClient(
+        transport=transport,
         follow_redirects=True,
         timeout=timeout_config,
-        limits=limits,
         headers={"User-Agent": USER_AGENT},
         trust_env=False,
     )

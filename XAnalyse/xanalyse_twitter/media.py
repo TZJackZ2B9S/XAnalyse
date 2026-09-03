@@ -22,7 +22,7 @@ from .models import MediaItem, MediaType
 from ..xanalyse_config import XAnalyseSettings
 from ..utils.resource.RESOURCE_PATH import CACHE_PATH
 
-_MEDIA_TIMEOUT = httpx.Timeout(10.0, connect=5.0, pool=3.0)
+_MEDIA_TIMEOUT = httpx.Timeout(30.0, connect=8.0, pool=8.0)
 _PROBE_TIMEOUT = 8.0
 
 _GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {

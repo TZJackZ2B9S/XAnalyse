@@ -76,7 +76,7 @@ async def translate_text(
         "Authorization": f"Bearer {settings.api_key}",
     }
     active_client = client or await get_http_client(settings.proxy)
-    timeout = httpx.Timeout(8.0, connect=5.0, pool=3.0)
+    timeout = httpx.Timeout(12.0, connect=8.0, pool=8.0)
     for attempt in range(settings.translate_retries):
         try:
             response = await active_client.post(endpoint, json=payload, headers=headers, timeout=timeout)

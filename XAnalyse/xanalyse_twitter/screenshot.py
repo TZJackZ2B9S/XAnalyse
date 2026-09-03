@@ -72,6 +72,7 @@ _MAX_AVATAR_BYTES = 1 * 1024 * 1024
 _AVATAR_TIMEOUT = httpx.Timeout(4.0, connect=2.0, pool=2.0)
 _MAX_PREVIEW_ITEMS = 4
 _PREVIEW_TIMEOUT = httpx.Timeout(4.0, connect=2.0, pool=2.0)
+_PREVIEW_SEMAPHORE = asyncio.Semaphore(2)
 _PREVIEW_SIZE = (1_200, 1_200)
 _PREVIEW_JPEG_QUALITY = 88
 _MAX_SOURCE_DIMENSION = 4_096
@@ -423,29 +424,30 @@ async def _download_media_preview(client: httpx.AsyncClient, item: MediaItem) ->
     parsed = urlsplit(preview_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return None
-    try:
-        async with client.stream(
-            "GET",
-            preview_url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=_PREVIEW_TIMEOUT,
-        ) as response:
-            response.raise_for_status()
-            chunks = bytearray()
-            async for chunk in response.aiter_bytes():
-                chunks.extend(chunk)
-            if not chunks:
-                return None
-            raw_data = bytes(chunks)
-            del chunks
-        preview_data = await asyncio.to_thread(_thumbnail_media, raw_data)
-        if preview_data is None:
-            logger.warning(f"[XAnalyse] 媒体预览解码失败：{preview_url}")
-        return preview_data
-    except (httpx.HTTPError, ValueError, OSError) as error:
-        detail = str(error).strip() or error.__class__.__name__
-        logger.debug(f"[XAnalyse] 媒体预览下载失败：{preview_url}：{detail}")
-        return None
+    async with _PREVIEW_SEMAPHORE:
+        try:
+            async with client.stream(
+                "GET",
+                preview_url,
+                headers={"User-Agent": USER_AGENT},
+                timeout=_PREVIEW_TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    chunks.extend(chunk)
+                if not chunks:
+                    return None
+                raw_data = bytes(chunks)
+                del chunks
+            preview_data = await asyncio.to_thread(_thumbnail_media, raw_data)
+            if preview_data is None:
+                logger.warning(f"[XAnalyse] 媒体预览解码失败：{preview_url}")
+            return preview_data
+        except (httpx.HTTPError, ValueError, OSError) as error:
+            detail = str(error).strip() or error.__class__.__name__
+            logger.debug(f"[XAnalyse] 媒体预览下载失败：{preview_url}：{detail}")
+            return None
 
 
 async def _download_media_previews(
