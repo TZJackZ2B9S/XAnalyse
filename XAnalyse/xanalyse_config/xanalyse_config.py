@@ -36,12 +36,7 @@ class XAnalyseSettings:
     update_interval: int
     fetch_retries: int
     max_media_size_mb: int
-    translate_enabled: bool
-    api_key: str
-    api_url: str
-    model: str
-    prompt: str
-    translate_retries: int
+    grok_translation_enabled: bool
     bloggers: tuple[BloggerConfig, ...]
     output_logs: bool
     detect_x_links: bool
@@ -110,12 +105,7 @@ def get_settings() -> XAnalyseSettings:
         fetch_retries=max(1, _int("fetchRetries")),
         max_media_size_mb=max(0, _int("maxMediaSize")),
         gif_quality=_str("gifQuality").strip().lower(),
-        translate_enabled=_bool("whe_translate"),
-        api_key=_str("apiKey").strip(),
-        api_url=_str("apiurl").strip(),
-        model=_str("model").strip(),
-        prompt=_str("prompt"),
-        translate_retries=max(1, _int("translateRetries")),
+        grok_translation_enabled=_bool("grokTranslation"),
         bloggers=_bloggers(),
         output_logs=_bool("outputLogs"),
         detect_x_links=_bool("detectXLinks"),

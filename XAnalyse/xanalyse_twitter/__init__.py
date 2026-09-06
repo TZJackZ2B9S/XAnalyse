@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import asyncio
-from dataclasses import dataclass
+from dataclasses import replace, dataclass
 from urllib.parse import urljoin
 
 import httpx
@@ -38,7 +38,6 @@ from .screenshot import (
     ScreenshotResult,
     render_tweet_card,
 )
-from .translation import translate_text
 from ..utils.database import XAnalyseTweet
 from ..xanalyse_config import BloggerConfig, XAnalyseSettings, get_settings
 
@@ -57,6 +56,7 @@ class TweetContent:
     translated: str
     screenshot: ScreenshotResult
     retweet: bool = False
+    translation_source_lang: str = ""
 
 
 @dataclass(frozen=True)
@@ -65,16 +65,6 @@ class TweetContentResult:
     not_found: bool = False
     invalid_url: bool = False
     error: str = ""
-
-
-def _translation_input(tweet: TweetData) -> str:
-    alt_texts = [item.alt_text for item in tweet.media if item.alt_text]
-    if not alt_texts:
-        return tweet.text
-    alt_lines = [
-        f"[图片{index if len(alt_texts) > 1 else ''}描述: {value}]" for index, value in enumerate(alt_texts, start=1)
-    ]
-    return f"{tweet.text}\n\n" + "\n".join(alt_lines)
 
 
 async def _expand_short_link(client: httpx.AsyncClient, url: str) -> str | None:
@@ -121,10 +111,29 @@ async def _fetch_tweet_content(
         if tweet is None:
             return TweetContentResult(error=result.error)
 
-    translated = await translate_text(_translation_input(tweet), settings, client)
+    if settings.grok_translation_enabled and tweet.quote is not None and tweet.quote.translation is None:
+        quote_url = normalize_url(tweet.quote.url)
+        if quote_url is not None and is_tweet_url(quote_url):
+            quote_result = await fetch_tweet_data(quote_url, settings, client)
+            if quote_result.tweet is not None and quote_result.tweet.translation is not None:
+                tweet = replace(
+                    tweet,
+                    quote=replace(tweet.quote, translation=quote_result.tweet.translation),
+                )
+
+    translation = tweet.translation if settings.grok_translation_enabled else None
+    translated = translation.text if translation is not None else tweet.text
+    translation_source_lang = translation.source_lang if translation is not None else ""
     screenshot = ScreenshotResult(data=None)
     if settings.enable_screenshot:
-        screenshot = await render_tweet_card(tweet, translated, normalized, client=client)
+        screenshot = await render_tweet_card(
+            tweet,
+            translated,
+            normalized,
+            translation_source_lang=translation_source_lang,
+            show_translation=settings.grok_translation_enabled,
+            client=client,
+        )
     if settings.output_logs:
         logger.info(f"[XAnalyse] API 文案处理完成（{time.perf_counter() - started:.2f}s）")
     return TweetContentResult(
@@ -132,6 +141,7 @@ async def _fetch_tweet_content(
             tweet=tweet,
             translated=translated,
             screenshot=screenshot,
+            translation_source_lang=translation_source_lang,
             retweet=retweet or tweet.is_retweet,
         )
     )

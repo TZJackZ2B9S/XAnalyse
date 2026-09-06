@@ -16,7 +16,7 @@ import httpx
 
 from gsuid_core.logger import logger
 
-from .models import MediaItem, MediaType, TweetData, TweetFetchResult
+from .models import MediaItem, MediaType, TweetData, TranslationData, TweetFetchResult
 from ..xanalyse_config import XAnalyseSettings
 
 USER_AGENT = (
@@ -244,12 +244,15 @@ def extract_candidate_links(text: str) -> list[str]:
 
 
 def api_url_for_tweet(value: str) -> str:
-    """把 X/Twitter 推文链接映射到 fxtwitter API。"""
+    """把 X/Twitter 推文链接映射到 FxTwitter API v2。"""
 
     parsed = _split_url(value)
     if parsed is None or not _is_x_host(parsed.hostname or "") or parsed.hostname == "t.co":
         raise ValueError("无效的 X/Twitter 链接")
-    return urlunsplit(("https", "api.fxtwitter.com", parsed.path, parsed.query, ""))
+    match = re.search(r"/status/(\d+)(?:/|$)", parsed.path, re.IGNORECASE)
+    if match is None:
+        raise ValueError("无效的 X/Twitter 链接")
+    return f"https://api.fxtwitter.com/2/status/{match.group(1)}"
 
 
 def api_url_for_profile(handle: str) -> str:
@@ -433,6 +436,21 @@ def _append_media(media: list[MediaItem], seen: set[str], raw: object, *, articl
         )
 
 
+def _translation_from_mapping(tweet: Mapping[str, object]) -> TranslationData | None:
+    raw_translation = _object(_value(tweet, "translation"))
+    if raw_translation is None:
+        return None
+    text = _string(raw_translation, "text").strip()
+    if not text:
+        return None
+    return TranslationData(
+        text=text,
+        source_lang=_string(raw_translation, "source_lang").strip().lower(),
+        target_lang=_string(raw_translation, "target_lang").strip().lower(),
+        provider=_string(raw_translation, "provider").strip(),
+    )
+
+
 def _tweet_data_from_mapping(tweet: Mapping[str, object], *, quote_depth: int = 0) -> TweetData:
     author = _object(_value(tweet, "author"))
     author_name = _string(author, "name", "未知用户") if author is not None else "未知用户"
@@ -487,6 +505,11 @@ def _tweet_data_from_mapping(tweet: Mapping[str, object], *, quote_depth: int = 
         raw_quote = _object(_value(tweet, "quote"))
         if raw_quote is not None:
             quote = _tweet_data_from_mapping(raw_quote, quote_depth=quote_depth + 1)
+    tweet_url = _string(tweet, "url").strip()
+    if not tweet_url:
+        tweet_id = _string(tweet, "id").strip()
+        if tweet_id and author_handle:
+            tweet_url = f"https://x.com/{author_handle}/status/{tweet_id}"
     return TweetData(
         text=text,
         author_name=author_name or "未知用户",
@@ -500,7 +523,9 @@ def _tweet_data_from_mapping(tweet: Mapping[str, object], *, quote_depth: int = 
         verified=verified,
         is_retweet=_object(_value(tweet, "reposted_by")) is not None,
         avatar_url=avatar_url.strip(),
+        url=tweet_url,
         quote=quote,
+        translation=_translation_from_mapping(tweet),
     )
 
 
@@ -568,7 +593,8 @@ async def fetch_tweet_data(
             if settings.output_logs:
                 label = "开始请求" if attempt == 0 else f"第 {attempt + 1}/{settings.fetch_retries} 次重试"
                 logger.info(f"[XAnalyse] {label} API: {api_url}")
-            response = await active_client.get(api_url, headers=headers, timeout=_API_TIMEOUT)
+            params = {"lang": "zh-cn"} if settings.grok_translation_enabled else None
+            response = await active_client.get(api_url, params=params, headers=headers, timeout=_API_TIMEOUT)
             if settings.output_logs:
                 logger.info(
                     f"[XAnalyse] API 响应 HTTP {response.status_code}（{time.perf_counter() - request_started:.2f}s）"
@@ -611,12 +637,10 @@ async def fetch_latest_tweet(
     for attempt in range(settings.fetch_retries):
         try:
             request_started = time.perf_counter()
-            response = await active_client.get(
-                api_url,
-                params={"count": "1", "with_replies": "false", "groupthreads": "false"},
-                headers=headers,
-                timeout=_API_TIMEOUT,
-            )
+            params = {"count": "1", "with_replies": "false", "groupthreads": "false"}
+            if settings.grok_translation_enabled:
+                params["lang"] = "zh-cn"
+            response = await active_client.get(api_url, params=params, headers=headers, timeout=_API_TIMEOUT)
             if settings.output_logs:
                 logger.info(
                     f"[XAnalyse] 用户时间线 HTTP {response.status_code}（"

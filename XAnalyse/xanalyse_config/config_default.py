@@ -9,11 +9,6 @@ from gsuid_core.utils.plugins_config.models import (
     GsRepeatGroupConfig,
 )
 
-DEFAULT_PROMPT = (
-    "翻译成简体中文，直接给出翻译结果，不要有多余输出不要修改标点符号，"
-    "如果遇到网址或者空白内容请不要翻译，请翻译: {text}"
-)
-
 CONFIG_DEFAULT: dict[str, GSC] = {
     "account": GsStrConfig(
         title="机器人账号",
@@ -59,37 +54,10 @@ CONFIG_DEFAULT: dict[str, GSC] = {
         data="medium",
         options=["low", "medium", "high"],
     ),
-    "whe_translate": GsBoolConfig(
-        title="启用推文翻译",
-        desc="通过 OpenAI 兼容接口翻译推文正文和图片描述。",
+    "grokTranslation": GsBoolConfig(
+        title="是否开启 Grok 翻译",
+        desc="请求 FxTwitter v2 的 Grok 翻译；关闭时保留推文原文。",
         data=False,
-    ),
-    "apiKey": GsStrConfig(
-        title="翻译 API Key",
-        desc="DeepSeek 或其他 OpenAI 兼容翻译服务的 API Key。",
-        data="",
-        secret=True,
-    ),
-    "apiurl": GsStrConfig(
-        title="翻译 API 地址",
-        desc="OpenAI 兼容 API 根地址，例如 https://api.deepseek.com。",
-        data="https://api.deepseek.com",
-    ),
-    "model": GsStrConfig(
-        title="翻译模型",
-        desc="翻译接口使用的模型名称。",
-        data="deepseek-chat",
-    ),
-    "prompt": GsStrConfig(
-        title="翻译提示词",
-        desc="使用 {text} 表示待翻译内容。",
-        data=DEFAULT_PROMPT,
-    ),
-    "translateRetries": GsIntConfig(
-        title="翻译失败重试次数",
-        desc="翻译接口失败时的最大尝试次数。",
-        data=3,
-        max_value=10,
     ),
     "bloggers": GsRepeatGroupConfig(
         title="订阅的博主列表",
@@ -125,7 +93,7 @@ CONFIG_DEFAULT: dict[str, GSC] = {
     ),
     "proxy": GsStrConfig(
         title="网络代理",
-        desc="X API、媒体和翻译请求使用的代理，例如 http://<host>:<port> 或 socks5://<host>:<port>；留空直连。",
+        desc="X API、媒体和头像请求使用的代理，例如 http://<host>:<port> 或 socks5://<host>:<port>；留空直连。",
         data="",
         secret=True,
     ),

@@ -9,6 +9,16 @@ MediaType = Literal["image", "video", "animated_gif"]
 
 
 @dataclass(frozen=True)
+class TranslationData:
+    """FxTwitter v2 返回的内置翻译。"""
+
+    text: str
+    source_lang: str
+    target_lang: str = ""
+    provider: str = ""
+
+
+@dataclass(frozen=True)
 class MediaItem:
     """推文中的一个媒体资源。"""
 
@@ -36,7 +46,9 @@ class TweetData:
     verified: bool = False
     is_retweet: bool = False
     avatar_url: str = ""
+    url: str = ""
     quote: TweetData | None = None
+    translation: TranslationData | None = None
 
 
 @dataclass(frozen=True)

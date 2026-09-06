@@ -90,6 +90,12 @@ _QUOTE_MEDIA_SIZE = 192
 _QUOTE_MEDIA_GAP = 4
 _QUOTE_MEDIA_RADIUS = 18
 _QUOTE_BODY_GAP = 16
+_TRANSLATION_ROW_HEIGHT = 42
+_TRANSLATION_ICON_SIZE = 28
+_TRANSLATION_ICON_GAP = 4
+_QUOTE_TRANSLATION_ROW_HEIGHT = 32
+_QUOTE_TRANSLATION_ICON_SIZE = 24
+_QUOTE_TRANSLATION_GAP = 4
 _PORTRAIT_ASPECT_LIMIT = 1.0
 _VERY_WIDE_ASPECT = 2.0
 _MIXED_MIN_COLUMN_WIDTH = 220
@@ -327,7 +333,7 @@ def _limit_lines(lines: list[str], font: ImageFont.FreeTypeFont, max_width: floa
     if len(lines) <= limit:
         return lines
     result = lines[:limit]
-    result[-1] = _ellipsize(result[-1], font, max_width)
+    result[-1] = _ellipsize(f"{result[-1]}…", font, max_width)
     return result
 
 
@@ -1154,6 +1160,70 @@ def _draw_centered_text(
     )
 
 
+_LANGUAGE_NAMES = {
+    "ar": "阿拉伯语",
+    "de": "德语",
+    "en": "英语",
+    "es": "西班牙语",
+    "fr": "法语",
+    "hi": "印地语",
+    "id": "印尼语",
+    "it": "意大利语",
+    "ja": "日语",
+    "ko": "韩语",
+    "pt": "葡萄牙语",
+    "ru": "俄语",
+    "th": "泰语",
+    "tr": "土耳其语",
+    "vi": "越南语",
+    "zh": "中文",
+    "zh-cn": "中文",
+    "zh-tw": "繁体中文",
+}
+
+
+def _language_name(language: str) -> str:
+    normalized = language.strip().lower().replace("_", "-")
+    if normalized in _LANGUAGE_NAMES:
+        return _LANGUAGE_NAMES[normalized]
+    base_language = normalized.split("-", 1)[0]
+    return _LANGUAGE_NAMES.get(base_language, normalized.upper() or "未知语言")
+
+
+def _draw_translation_row(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    source_lang: str,
+    top: int,
+    font: ImageFont.FreeTypeFont,
+    *,
+    left: int = _CARD_MARGIN,
+    row_height: int = _TRANSLATION_ROW_HEIGHT,
+    icon_size: int = _TRANSLATION_ICON_SIZE,
+    icon_gap: int = _TRANSLATION_ICON_GAP,
+) -> None:
+    icon_left = left
+    text_bbox = font.getbbox("中")
+    text_top = top + text_bbox[1]
+    text_bottom = top + text_bbox[3]
+    icon_mask = _grok_icon_mask(_TRANSLATION_ICON_SIZE)
+    icon_bbox = icon_mask.getbbox()
+    if icon_bbox is None:
+        icon_top = top + (row_height - icon_size) // 2
+    else:
+        icon_top = round((text_top + text_bottom - icon_bbox[1] - icon_bbox[3]) / 2)
+    _draw_action_icon(image, "grok", icon_left, icon_top, icon_size, _SECONDARY)
+    source_label = f"翻译自{_language_name(source_lang)}"
+    _draw_card_text(
+        image,
+        draw,
+        (left + icon_size + icon_gap, top),
+        source_label,
+        font,
+        _SECONDARY,
+    )
+
+
 def _action_items(tweet: TweetData) -> list[tuple[str, str | None]]:
     """返回有数据的统计操作项。"""
 
@@ -1195,7 +1265,18 @@ _X_ICON_PATHS: dict[str, str] = {
     "views": "M8.75 21V3h2v18h-2zM18 21V8.5h2V21h-2zM4 21l.004-10h2L6 21H4zm9.248 0v-7h2v7h-2z",
 }
 _SVG_TOKEN_RE = re.compile(r"[A-Za-z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
-_SVG_COMMAND_ARITY = {"M": 2, "m": 2, "L": 2, "l": 2, "H": 1, "h": 1, "V": 1, "v": 1, "C": 6, "c": 6}
+_SVG_COMMAND_ARITY = {
+    "M": 2,
+    "m": 2,
+    "L": 2,
+    "l": 2,
+    "H": 1,
+    "h": 1,
+    "V": 1,
+    "v": 1,
+    "C": 6,
+    "c": 6,
+}
 
 
 def _parse_icon_path(path: str) -> tuple[tuple[tuple[float, float], ...], ...]:
@@ -1338,6 +1419,25 @@ def _action_icon_mask(kind: str, size: int) -> Image.Image:
     return mask.resize((size, size), Image.Resampling.LANCZOS)
 
 
+@lru_cache(maxsize=32)
+def _grok_icon_mask(size: int) -> Image.Image:
+    """读取参考截图中抠出的 Grok 图标，并缩放为指定尺寸的透明蒙版。"""
+
+    resource = files(__package__.rsplit(".", 1)[0]).joinpath("assets/grok_icon.png")
+    with resource.open("rb") as resource_file:
+        icon = Image.open(resource_file).convert("RGBA")
+    alpha = icon.getchannel("A")
+    bounds = alpha.getbbox()
+    if bounds is not None:
+        alpha = alpha.crop(bounds)
+    alpha.thumbnail((size, size), Image.Resampling.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    left = (size - alpha.width) // 2
+    top = (size - alpha.height) // 2
+    mask.paste(alpha, (left, top))
+    return mask
+
+
 def _draw_action_icon(
     image: Image.Image,
     kind: str,
@@ -1348,7 +1448,7 @@ def _draw_action_icon(
 ) -> None:
     """绘制统计图标。"""
 
-    icon_mask = _action_icon_mask(kind, size)
+    icon_mask = _grok_icon_mask(size) if kind == "grok" else _action_icon_mask(kind, size)
     image.paste(color, (round(left), round(top)), icon_mask)
 
 
@@ -1384,16 +1484,34 @@ def _draw_action_bar(
             )
 
 
-def _quote_text_lines(quote: TweetData, text_font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
-    clean_text = quote.text.strip()
+def _quote_text_lines(
+    text: str,
+    text_font: ImageFont.FreeTypeFont,
+    max_width: int,
+    *,
+    max_lines: int = _QUOTE_TEXT_MAX_LINES,
+) -> list[str]:
+    clean_text = text.strip()
     if not clean_text:
         return []
     return _limit_lines(
         _wrap_card_text(clean_text, text_font, max_width),
         text_font,
         max_width,
-        _QUOTE_TEXT_MAX_LINES,
+        max_lines,
     )
+
+
+def _quote_display_text(quote: TweetData, show_translation: bool) -> str:
+    if show_translation and quote.translation is not None and quote.translation.text.strip():
+        return quote.translation.text
+    return quote.text
+
+
+def _quote_translation_source(quote: TweetData, show_translation: bool) -> str:
+    if show_translation and quote.translation is not None and quote.translation.text.strip():
+        return quote.translation.source_lang
+    return ""
 
 
 def _quote_text_width(
@@ -1414,11 +1532,22 @@ def _quote_body_layout(
     media_width: int,
     *,
     compact_media: bool,
+    show_translation: bool,
 ) -> tuple[list[str], int]:
     text_font = _load_card_font(30)
     text_width = _quote_text_width(media_previews, inner_width, compact_media=compact_media)
-    text_lines = _quote_text_lines(quote, text_font, text_width)
-    text_height = len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
+    text_max_lines = _QUOTE_TEXT_MAX_LINES
+    translation_source = _quote_translation_source(quote, show_translation)
+    translation_offset = _QUOTE_TRANSLATION_ROW_HEIGHT + _QUOTE_TRANSLATION_GAP if translation_source else 0
+    if compact_media and media_previews:
+        text_max_lines = max(1, (_QUOTE_MEDIA_SIZE - 8 - translation_offset) // _QUOTE_TEXT_LINE_HEIGHT)
+    text_lines = _quote_text_lines(
+        _quote_display_text(quote, show_translation),
+        text_font,
+        text_width,
+        max_lines=text_max_lines,
+    )
+    text_height = len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT + translation_offset
     if not media_previews:
         return text_lines, text_height
     media_height = _QUOTE_MEDIA_SIZE if compact_media else _media_section_height(media_previews, media_width)
@@ -1516,6 +1645,7 @@ def _quote_section_height(
     max_width: int,
     *,
     compact_media: bool,
+    show_translation: bool,
 ) -> int:
     if quote is None:
         return 0
@@ -1526,6 +1656,7 @@ def _quote_section_height(
         inner_width,
         max_width,
         compact_media=compact_media,
+        show_translation=show_translation,
     )
     content_height = 60
     if body_height:
@@ -1574,6 +1705,7 @@ def _draw_quote_card(
     max_width: int,
     *,
     compact_media: bool,
+    show_translation: bool,
 ) -> None:
     """绘制接近 X 原生样式的嵌套引用推文。"""
 
@@ -1582,6 +1714,7 @@ def _draw_quote_card(
         quote_media_previews,
         max_width,
         compact_media=compact_media,
+        show_translation=show_translation,
     )
     left = _CARD_MARGIN
     draw.rounded_rectangle(
@@ -1627,20 +1760,36 @@ def _draw_quote_card(
     )
 
     text_font = _load_card_font(30)
+    quote_translation_source = _quote_translation_source(quote, show_translation)
     text_lines, body_height = _quote_body_layout(
         quote,
         quote_media_previews,
         inner_width,
         max_width,
         compact_media=compact_media,
+        show_translation=show_translation,
     )
     if body_height:
         body_top = inner_top + avatar_size + 14
         if quote_media_previews and not compact_media:
+            text_top = body_top
+            if quote_translation_source:
+                _draw_translation_row(
+                    image,
+                    draw,
+                    quote_translation_source,
+                    body_top,
+                    _load_card_font(22),
+                    left=inner_left,
+                    row_height=_QUOTE_TRANSLATION_ROW_HEIGHT,
+                    icon_size=_QUOTE_TRANSLATION_ICON_SIZE,
+                    icon_gap=_QUOTE_TRANSLATION_GAP,
+                )
+                text_top += _QUOTE_TRANSLATION_ROW_HEIGHT + _QUOTE_TRANSLATION_GAP
             for line_index, line in enumerate(text_lines):
-                text_top = body_top + line_index * _QUOTE_TEXT_LINE_HEIGHT
-                _draw_card_text(image, draw, (inner_left, text_top), line, text_font, _TEXT)
-            media_top = body_top + len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
+                line_top = text_top + line_index * _QUOTE_TEXT_LINE_HEIGHT
+                _draw_card_text(image, draw, (inner_left, line_top), line, text_font, _TEXT)
+            media_top = text_top + len(text_lines) * _QUOTE_TEXT_LINE_HEIGHT
             if text_lines:
                 media_top += 14
             _draw_full_width_quote_media(image, quote_media_previews, media_top, left, max_width)
@@ -1669,9 +1818,23 @@ def _draw_quote_card(
             text_left = inner_left + _QUOTE_MEDIA_SIZE + _QUOTE_BODY_GAP
         else:
             text_left = inner_left
+        text_top = body_top
+        if quote_translation_source:
+            _draw_translation_row(
+                image,
+                draw,
+                quote_translation_source,
+                body_top,
+                _load_card_font(22),
+                left=text_left,
+                row_height=_QUOTE_TRANSLATION_ROW_HEIGHT,
+                icon_size=_QUOTE_TRANSLATION_ICON_SIZE,
+                icon_gap=_QUOTE_TRANSLATION_GAP,
+            )
+            text_top += _QUOTE_TRANSLATION_ROW_HEIGHT + _QUOTE_TRANSLATION_GAP
         for line_index, line in enumerate(text_lines):
-            text_top = body_top + line_index * _QUOTE_TEXT_LINE_HEIGHT
-            _draw_card_text(image, draw, (text_left, text_top), line, text_font, _TEXT)
+            line_top = text_top + line_index * _QUOTE_TEXT_LINE_HEIGHT
+            _draw_card_text(image, draw, (text_left, line_top), line, text_font, _TEXT)
 
 
 def _render_tweet_card_sync(
@@ -1682,6 +1845,8 @@ def _render_tweet_card_sync(
     media_previews: tuple[MediaPreview, ...] = (),
     quote_avatar_data: bytes | None = None,
     quote_media_previews: tuple[MediaPreview, ...] = (),
+    translation_source_lang: str = "",
+    show_translation: bool = False,
 ) -> bytes:
     body_font = _load_card_font(34)
     small_font = _load_card_font(25)
@@ -1702,6 +1867,7 @@ def _render_tweet_card_sync(
         quote_media_previews,
         max_width,
         compact_media=compact_quote_media,
+        show_translation=show_translation,
     )
     quote_gap = 18 if tweet.quote is not None else 0
     outer_media_max_height = _SINGLE_MEDIA_MAX_HEIGHT
@@ -1715,9 +1881,11 @@ def _render_tweet_card_sync(
         max_width,
         max_panel_height=outer_media_max_height,
     )
+    translation_row_height = _TRANSLATION_ROW_HEIGHT if translation_source_lang else 0
+    body_start = 166 + translation_row_height
     max_body_lines = max(
         1,
-        (_CARD_MAX_HEIGHT - 166 - media_gap - media_height - quote_gap - quote_height - 18 - footer_height)
+        (_CARD_MAX_HEIGHT - body_start - media_gap - media_height - quote_gap - quote_height - 18 - footer_height)
         // _CARD_LINE_HEIGHT,
     )
     body_lines = _limit_lines(
@@ -1726,7 +1894,7 @@ def _render_tweet_card_sync(
         max_width,
         min(_CARD_BODY_MAX_LINES, max_body_lines),
     )
-    body_bottom = 166 + len(body_lines) * _CARD_LINE_HEIGHT
+    body_bottom = body_start + len(body_lines) * _CARD_LINE_HEIGHT
     media_top = body_bottom + media_gap
     media_bottom = media_top + media_height
     quote_top = media_bottom + quote_gap
@@ -1766,7 +1934,10 @@ def _render_tweet_card_sync(
     )
     _draw_centered_text(image, draw, (_CARD_WIDTH - 86, 76), "···", _load_card_font(30, bold=True), _SECONDARY)
 
-    body_y = 166
+    if translation_source_lang:
+        _draw_translation_row(image, draw, translation_source_lang, 166, small_font)
+
+    body_y = body_start
     for line in body_lines:
         _draw_card_text(image, draw, (_CARD_MARGIN, body_y), line, body_font, _TEXT)
         body_y += _CARD_LINE_HEIGHT
@@ -1789,6 +1960,7 @@ def _render_tweet_card_sync(
             quote_top,
             max_width,
             compact_media=compact_quote_media,
+            show_translation=show_translation,
         )
     _draw_action_bar(image, draw, tweet, footer_top, max_width, small_font)
     media_text = _media_summary(tweet)
@@ -1824,6 +1996,8 @@ async def render_tweet_card(
     text: str,
     link: str,
     *,
+    translation_source_lang: str = "",
+    show_translation: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> ScreenshotResult:
     """在线程池绘制卡片，避免 PIL 阻塞 Core 事件循环。"""
@@ -1836,7 +2010,14 @@ async def render_tweet_card(
     quote_avatar_data, quote_media_previews = quote_assets
     try:
         if avatar_data is None and not media_previews and quote_avatar_data is None and not quote_media_previews:
-            data = await asyncio.to_thread(_render_tweet_card_sync, tweet, text, link)
+            data = await asyncio.to_thread(
+                _render_tweet_card_sync,
+                tweet,
+                text,
+                link,
+                translation_source_lang=translation_source_lang,
+                show_translation=show_translation,
+            )
         else:
             data = await asyncio.to_thread(
                 _render_tweet_card_sync,
@@ -1847,6 +2028,8 @@ async def render_tweet_card(
                 media_previews,
                 quote_avatar_data,
                 quote_media_previews,
+                translation_source_lang,
+                show_translation,
             )
     except (OSError, ValueError) as error:
         logger.warning(f"[XAnalyse] PIL 卡片生成失败：{error}")
