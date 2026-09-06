@@ -29,14 +29,17 @@ from .api import (
     close_http_client,
     fetch_latest_tweet,
     build_tweet_message,
+    fetch_tweet_comments,
     extract_candidate_links,
     handle_from_profile_url,
+    fetch_comment_translations,
 )
 from .media import download_media, media_to_message
 from .models import TweetData
 from .screenshot import (
     ScreenshotResult,
     render_tweet_card,
+    select_visible_comments,
 )
 from ..utils.database import XAnalyseTweet
 from ..xanalyse_config import BloggerConfig, XAnalyseSettings, get_settings
@@ -57,6 +60,7 @@ class TweetContent:
     screenshot: ScreenshotResult
     retweet: bool = False
     translation_source_lang: str = ""
+    comments: tuple[TweetData, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -124,16 +128,60 @@ async def _fetch_tweet_content(
     translation = tweet.translation if settings.grok_translation_enabled else None
     translated = translation.text if translation is not None else tweet.text
     translation_source_lang = translation.source_lang if translation is not None else ""
+    comments: tuple[TweetData, ...] = ()
+    if settings.enable_screenshot and settings.comment_parsing_enabled:
+        comments = await fetch_tweet_comments(tweet, settings, client)
     screenshot = ScreenshotResult(data=None)
     if settings.enable_screenshot:
-        screenshot = await render_tweet_card(
-            tweet,
-            translated,
-            normalized,
-            translation_source_lang=translation_source_lang,
-            show_translation=settings.grok_translation_enabled,
-            client=client,
-        )
+        if comments:
+            base_screenshot = await render_tweet_card(
+                tweet,
+                translated,
+                normalized,
+                translation_source_lang=translation_source_lang,
+                show_translation=settings.grok_translation_enabled,
+                client=client,
+            )
+            if base_screenshot.data is None:
+                screenshot = base_screenshot
+                comments = ()
+            else:
+                visible_comments = select_visible_comments(base_screenshot.data, comments)
+                if not visible_comments:
+                    screenshot = base_screenshot
+                    comments = ()
+                else:
+                    if settings.grok_translation_enabled:
+                        visible_comments = await fetch_comment_translations(
+                            visible_comments,
+                            settings,
+                            client,
+                            len(visible_comments),
+                        )
+                    comments = select_visible_comments(base_screenshot.data, visible_comments)
+                    if comments:
+                        screenshot = await render_tweet_card(
+                            tweet,
+                            translated,
+                            normalized,
+                            translation_source_lang=translation_source_lang,
+                            show_translation=settings.grok_translation_enabled,
+                            comments=comments,
+                            base_data=base_screenshot.data,
+                            client=client,
+                        )
+                    else:
+                        screenshot = base_screenshot
+        else:
+            screenshot = await render_tweet_card(
+                tweet,
+                translated,
+                normalized,
+                translation_source_lang=translation_source_lang,
+                show_translation=settings.grok_translation_enabled,
+                comments=comments,
+                client=client,
+            )
     if settings.output_logs:
         logger.info(f"[XAnalyse] API 文案处理完成（{time.perf_counter() - started:.2f}s）")
     return TweetContentResult(
@@ -143,6 +191,7 @@ async def _fetch_tweet_content(
             screenshot=screenshot,
             translation_source_lang=translation_source_lang,
             retweet=retweet or tweet.is_retweet,
+            comments=comments,
         )
     )
 

@@ -24,6 +24,8 @@ from ..utils.resource.RESOURCE_PATH import CACHE_PATH
 
 _MEDIA_TIMEOUT = httpx.Timeout(30.0, connect=8.0, pool=8.0)
 _PROBE_TIMEOUT = 8.0
+_FFMPEG_TIMEOUT = 120.0
+_MAX_MEDIA_DOWNLOAD_BYTES = 512 * 1024 * 1024
 
 _GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {
     "low": (10, 480, 128, "bayer:bayer_scale=5"),
@@ -149,8 +151,8 @@ async def _ffmpeg_transform(data: bytes, args: list[str], input_suffix: str, out
     token = secrets.token_hex(8)
     input_path = CACHE_PATH / f"xanalyse_input_{token}{input_suffix}"
     output_path = CACHE_PATH / f"xanalyse_output_{token}{output_suffix}"
-    await _write_file(input_path, data)
     try:
+        await _write_file(input_path, data)
         resolved_args = [
             str(input_path) if arg == "INPUT" else str(output_path) if arg == "OUTPUT" else arg for arg in args
         ]
@@ -159,7 +161,14 @@ async def _ffmpeg_transform(data: bytes, args: list[str], input_suffix: str, out
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, stderr = await process.communicate()
+        try:
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=_FFMPEG_TIMEOUT)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            await process.communicate()
+            logger.warning("[XAnalyse] FFmpeg 处理超时，已终止任务")
+            return None
         if process.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()
             logger.debug(f"[XAnalyse] FFmpeg 处理失败：{detail[-300:]}")
@@ -336,7 +345,10 @@ async def download_media(
     settings: XAnalyseSettings,
 ) -> PreparedMedia | None:
     headers = {"User-Agent": USER_AGENT}
-    max_media_bytes = settings.max_media_size_mb * 1024 * 1024 if settings.max_media_size_mb > 0 else None
+    configured_limit = settings.max_media_size_mb * 1024 * 1024 if settings.max_media_size_mb > 0 else None
+    max_media_bytes = (
+        min(configured_limit, _MAX_MEDIA_DOWNLOAD_BYTES) if configured_limit is not None else _MAX_MEDIA_DOWNLOAD_BYTES
+    )
     for attempt in range(settings.fetch_retries):
         try:
             async with client.stream("GET", item.url, headers=headers, timeout=_MEDIA_TIMEOUT) as response:
@@ -348,12 +360,16 @@ async def download_media(
                     and content_length.isdigit()
                     and int(content_length) > max_media_bytes
                 ):
-                    logger.warning(f"[XAnalyse] 媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")
+                    logger.warning(
+                        f"[XAnalyse] 媒体超过 {max_media_bytes / 1024 / 1024:.0f} MB 安全上限，跳过：{item.url}"
+                    )
                     return None
                 chunks = bytearray()
                 async for chunk in response.aiter_bytes():
                     if max_media_bytes is not None and len(chunks) + len(chunk) > max_media_bytes:
-                        logger.warning(f"[XAnalyse] 媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")
+                        logger.warning(
+                            f"[XAnalyse] 媒体超过 {max_media_bytes / 1024 / 1024:.0f} MB 安全上限，跳过：{item.url}"
+                        )
                         return None
                     chunks.extend(chunk)
                 data = bytes(chunks)
@@ -363,7 +379,9 @@ async def download_media(
             prepared = await prepare_media(item, data, settings.gif_quality, settings.convert_gif)
             del data
             if max_media_bytes is not None and len(prepared.data) > max_media_bytes:
-                logger.warning(f"[XAnalyse] 处理后媒体超过 {settings.max_media_size_mb} MB，跳过：{item.url}")
+                logger.warning(
+                    f"[XAnalyse] 处理后媒体超过 {max_media_bytes / 1024 / 1024:.0f} MB 安全上限，跳过：{item.url}"
+                )
                 return None
             return prepared
         except (httpx.HTTPError, ValueError, OSError) as error:

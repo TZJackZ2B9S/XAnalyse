@@ -8,6 +8,7 @@ import time
 import asyncio
 from typing import TypedDict, TypeGuard
 from datetime import datetime
+from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from urllib.parse import SplitResult, quote, urlsplit, parse_qsl, urlencode, urlunsplit
 from collections.abc import Mapping
@@ -113,6 +114,9 @@ _RESERVED_PROFILE_HANDLES = frozenset(
 # FxTwitter 偶尔会在代理切换节点时重置连接。连接超时只影响失败请求，
 # 正常响应仍按实际耗时返回；较长的 pool 超时避免被媒体预览短暂占满时误报失败。
 _API_TIMEOUT = httpx.Timeout(12.0, connect=8.0, pool=8.0)
+_TRANSLATION_CACHE_TTL = 900.0
+_TRANSLATION_CACHE_LIMIT = 256
+_translation_cache: dict[str, tuple[float, TranslationData]] = {}
 _LINK_RE = re.compile(
     r"(?:https?://)?(?:www\.|mobile\.)?(?:x|twitter)\.com/[^/\s'\"<>]+/status/\d+(?![A-Za-z0-9_])"
     r"(?:[/?#][^\s'\"<>,!?;:，。？！；：、]*)?"
@@ -579,6 +583,8 @@ async def fetch_tweet_data(
     url: str,
     settings: XAnalyseSettings,
     client: httpx.AsyncClient | None = None,
+    *,
+    retry_limit: int | None = None,
 ) -> TweetFetchResult:
     """请求 fxtwitter，按配置重试并区分删除/私密推文。"""
 
@@ -587,11 +593,12 @@ async def fetch_tweet_data(
     headers: dict[str, str] = {"User-Agent": USER_AGENT}
 
     last_error = ""
-    for attempt in range(settings.fetch_retries):
+    attempts = max(1, retry_limit if retry_limit is not None else settings.fetch_retries)
+    for attempt in range(attempts):
         try:
             request_started = time.perf_counter()
             if settings.output_logs:
-                label = "开始请求" if attempt == 0 else f"第 {attempt + 1}/{settings.fetch_retries} 次重试"
+                label = "开始请求" if attempt == 0 else f"第 {attempt + 1}/{attempts} 次重试"
                 logger.info(f"[XAnalyse] {label} API: {api_url}")
             params = {"lang": "zh-cn"} if settings.grok_translation_enabled else None
             response = await active_client.get(api_url, params=params, headers=headers, timeout=_API_TIMEOUT)
@@ -616,7 +623,7 @@ async def fetch_tweet_data(
             return TweetFetchResult(tweet=None, error=last_error)
         except (httpx.HTTPError, ValueError) as error:
             last_error = _error_detail(error)
-            if attempt + 1 >= settings.fetch_retries:
+            if attempt + 1 >= attempts:
                 logger.warning(f"[XAnalyse] API 请求失败：{last_error}")
                 break
             await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
@@ -660,6 +667,212 @@ async def fetch_latest_tweet(
                 break
             await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
     return None
+
+
+def _cached_translation(url: str) -> TranslationData | None:
+    """读取短期翻译缓存，避免重复解析同一条评论。"""
+
+    key = url.strip()
+    if not key:
+        return None
+    cached = _translation_cache.get(key)
+    if cached is None:
+        return None
+    cached_at, translation = cached
+    if time.monotonic() - cached_at > _TRANSLATION_CACHE_TTL:
+        del _translation_cache[key]
+        return None
+    return translation
+
+
+def _cache_translation(url: str, translation: TranslationData) -> None:
+    """保存翻译结果并限制缓存大小，避免长期占用内存。"""
+
+    key = url.strip()
+    if not key:
+        return
+    _translation_cache[key] = (time.monotonic(), translation)
+    if len(_translation_cache) <= _TRANSLATION_CACHE_LIMIT:
+        return
+    oldest_key = min(_translation_cache, key=lambda item: _translation_cache[item][0])
+    del _translation_cache[oldest_key]
+
+
+def _parse_comment_results(
+    raw_results: list[object],
+    target_status: str,
+    handle: str,
+) -> tuple[tuple[str, TweetData], ...]:
+    """解析会话接口中的直接回复并清理原帖主前缀。"""
+
+    comments: list[tuple[str, TweetData]] = []
+    seen_ids: set[str] = set()
+    for raw_result in raw_results:
+        result = _object(raw_result)
+        if result is None:
+            continue
+        replying_to = _object(_value(result, "replying_to"))
+        if replying_to is None or str(_value(replying_to, "status") or "") != target_status:
+            continue
+        result_id = _string(result, "id")
+        if result_id and result_id in seen_ids:
+            continue
+        parsed = parse_tweet_payload({"status": result})
+        if parsed.tweet is None:
+            continue
+        # FxTwitter 的评论正文有时会把回复目标（原帖主）带在开头，
+        # 而翻译接口通常会自动省略它。统一移除这个前缀，避免同一评论
+        # 因是否翻译而出现不同的视觉内容；正文中间的 @ 提及保留不动。
+        comment_text = re.sub(
+            rf"^\s*@{re.escape(handle)}(?:\s+|$)",
+            "",
+            parsed.tweet.text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        comment = parsed.tweet
+        if comment_text != comment.text:
+            comment = replace(comment, text=comment_text)
+        key = result_id or comment.url
+        if not key or key in seen_ids:
+            continue
+        seen_ids.add(key)
+        comments.append((key, comment))
+    return tuple(comments)
+
+
+async def fetch_tweet_comments(
+    tweet: TweetData,
+    settings: XAnalyseSettings,
+    client: httpx.AsyncClient | None = None,
+) -> tuple[TweetData, ...]:
+    """通过 FxTwitter 会话接口获取当前推文的直接回复。"""
+
+    handle = tweet.author_handle.strip().lstrip("@")
+    match = re.search(r"/status/(\d+)(?:/|$)", tweet.url)
+    if not handle or match is None:
+        return ()
+
+    active_client = client or await get_http_client(settings.proxy)
+    target_status = match.group(1)
+    params: dict[str, str] = {"ranking_mode": "likes"}
+    if settings.grok_translation_enabled:
+        params["lang"] = "zh-cn"
+    started = time.perf_counter()
+    last_error = ""
+    for attempt in range(settings.fetch_retries):
+        try:
+            response = await active_client.get(
+                f"https://api.fxtwitter.com/2/conversation/{target_status}",
+                params=params,
+                headers={"User-Agent": USER_AGENT},
+                timeout=_API_TIMEOUT,
+            )
+            if response.status_code in {403, 429}:
+                last_error = f"评论 API 暂不可用（HTTP {response.status_code}）"
+                break
+            response.raise_for_status()
+            payload = response.json()
+            root = _object(payload)
+            raw_results = _value(root, "replies") if root is not None else None
+            if not isinstance(raw_results, list):
+                return ()
+            comments = _parse_comment_results(raw_results, target_status, handle)
+            if settings.grok_translation_enabled and any(
+                comment.translation is None and any(character.isalnum() for character in comment.text)
+                for _, comment in comments
+            ):
+                # FxTwitter 的 Grok 翻译是异步生成的，同一个会话接口可能一次
+                # 返回翻译、下一次暂时省略。短暂等待后重取一次，通常比逐条请求更快。
+                await asyncio.sleep(0.15)
+                try:
+                    refreshed_response = await active_client.get(
+                        f"https://api.fxtwitter.com/2/conversation/{target_status}",
+                        params=params,
+                        headers={"User-Agent": USER_AGENT},
+                        timeout=_API_TIMEOUT,
+                    )
+                    if refreshed_response.status_code == 200:
+                        refreshed_payload = refreshed_response.json()
+                        refreshed_root = _object(refreshed_payload)
+                        refreshed_results = _value(refreshed_root, "replies") if refreshed_root is not None else None
+                        if isinstance(refreshed_results, list):
+                            refreshed_comments = dict(_parse_comment_results(refreshed_results, target_status, handle))
+                            comments = tuple(
+                                (
+                                    key,
+                                    replace(comment, translation=refreshed_comments[key].translation)
+                                    if comment.translation is None
+                                    and key in refreshed_comments
+                                    and refreshed_comments[key].translation is not None
+                                    else comment,
+                                )
+                                for key, comment in comments
+                            )
+                except (httpx.HTTPError, ValueError) as error:
+                    logger.debug(f"[XAnalyse] 评论翻译刷新失败：{_error_detail(error)}")
+            for _, comment in comments:
+                if comment.translation is not None:
+                    _cache_translation(comment.url, comment.translation)
+            if settings.output_logs:
+                translated_count = sum(comment.translation is not None for _, comment in comments)
+                logger.info(
+                    f"[XAnalyse] 评论 API 完成：{len(comments)} 条，已有翻译 {translated_count} 条 "
+                    f"（{time.perf_counter() - started:.2f}s）"
+                )
+            return tuple(comment for _, comment in comments)
+        except (httpx.HTTPError, ValueError) as error:
+            last_error = _error_detail(error)
+            if attempt + 1 < settings.fetch_retries:
+                await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
+    if last_error:
+        logger.debug(f"[XAnalyse] 获取评论失败：{last_error}")
+    return ()
+
+
+async def fetch_comment_translations(
+    comments: tuple[TweetData, ...],
+    settings: XAnalyseSettings,
+    client: httpx.AsyncClient | None,
+    limit: int,
+) -> tuple[TweetData, ...]:
+    """只为卡片可显示范围内的评论补充 Grok 翻译。"""
+
+    if not settings.grok_translation_enabled or limit <= 0:
+        return comments
+    active_client = client or await get_http_client(settings.proxy)
+    translation_semaphore = asyncio.Semaphore(4)
+    started = time.perf_counter()
+
+    def retryable_text(text: str) -> bool:
+        return any(character.isalnum() for character in text)
+
+    async def fill_translation(index: int, comment: TweetData) -> TweetData:
+        if index >= limit or comment.translation is not None or not comment.url:
+            return comment
+        cached = _cached_translation(comment.url)
+        if cached is not None:
+            return replace(comment, translation=cached)
+        if not retryable_text(comment.text):
+            return comment
+        async with translation_semaphore:
+            for attempt in range(2):
+                translated = await fetch_tweet_data(comment.url, settings, active_client, retry_limit=1)
+                if translated.tweet is not None and translated.tweet.translation is not None:
+                    _cache_translation(comment.url, translated.tweet.translation)
+                    return replace(comment, translation=translated.tweet.translation)
+                if attempt == 0:
+                    await asyncio.sleep(0.15)
+        return comment
+
+    result = tuple(await asyncio.gather(*(fill_translation(index, comment) for index, comment in enumerate(comments))))
+    if settings.output_logs:
+        translated_count = sum(comment.translation is not None for comment in result[:limit])
+        logger.info(
+            f"[XAnalyse] 评论翻译补充完成：{translated_count}/{min(limit, len(result))} 条 "
+            f"（{time.perf_counter() - started:.2f}s）"
+        )
+    return result
 
 
 def format_number(value: float | None) -> str:

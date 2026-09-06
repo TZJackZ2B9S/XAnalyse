@@ -37,6 +37,7 @@ class XAnalyseSettings:
     fetch_retries: int
     max_media_size_mb: int
     grok_translation_enabled: bool
+    comment_parsing_enabled: bool
     bloggers: tuple[BloggerConfig, ...]
     output_logs: bool
     detect_x_links: bool
@@ -106,6 +107,7 @@ def get_settings() -> XAnalyseSettings:
         max_media_size_mb=max(0, _int("maxMediaSize")),
         gif_quality=_str("gifQuality").strip().lower(),
         grok_translation_enabled=_bool("grokTranslation"),
+        comment_parsing_enabled=_bool("commentParsing"),
         bloggers=_bloggers(),
         output_logs=_bool("outputLogs"),
         detect_x_links=_bool("detectXLinks"),

@@ -39,7 +39,7 @@ CONFIG_DEFAULT: dict[str, GSC] = {
     ),
     "maxMediaSize": GsIntConfig(
         title="媒体大小拦截（MB）",
-        desc="单个图片或视频超过此大小时跳过；填写 0 表示不限制。",
+        desc="单个图片或视频超过此大小时跳过；填写 0 使用 512 MB 安全上限，避免异常媒体耗尽内存。",
         data=256,
         max_value=4096,
     ),
@@ -57,6 +57,11 @@ CONFIG_DEFAULT: dict[str, GSC] = {
     "grokTranslation": GsBoolConfig(
         title="是否开启 Grok 翻译",
         desc="请求 FxTwitter v2 的 Grok 翻译；关闭时保留推文原文。",
+        data=False,
+    ),
+    "commentParsing": GsBoolConfig(
+        title="开启评论区解析",
+        desc="开启后请求推文评论并绘制到卡片右侧；关闭可减少 API 请求和内存占用。",
         data=False,
     ),
     "bloggers": GsRepeatGroupConfig(

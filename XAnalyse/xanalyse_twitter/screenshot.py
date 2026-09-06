@@ -73,6 +73,7 @@ _AVATAR_TIMEOUT = httpx.Timeout(4.0, connect=2.0, pool=2.0)
 _MAX_PREVIEW_ITEMS = 4
 _PREVIEW_TIMEOUT = httpx.Timeout(4.0, connect=2.0, pool=2.0)
 _PREVIEW_SEMAPHORE = asyncio.Semaphore(2)
+_MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 _PREVIEW_SIZE = (1_200, 1_200)
 _PREVIEW_JPEG_QUALITY = 88
 _MAX_SOURCE_DIMENSION = 4_096
@@ -96,6 +97,17 @@ _TRANSLATION_ICON_GAP = 4
 _QUOTE_TRANSLATION_ROW_HEIGHT = 32
 _QUOTE_TRANSLATION_ICON_SIZE = 24
 _QUOTE_TRANSLATION_GAP = 4
+_COMMENT_PANEL_WIDTH = 700
+_COMMENT_PANEL_RADIUS = 28
+_COMMENT_PADDING = 44
+_COMMENT_AVATAR_SIZE = 58
+_COMMENT_LINE_HEIGHT = 41
+_COMMENT_MAX_LINES = 4
+_COMMENT_ICON_SIZE = 22
+_COMMENT_MEDIA_WIDTH = 300
+_COMMENT_MEDIA_MAX_HEIGHT = 240
+_COMMENT_MEDIA_RADIUS = 16
+_COMMENT_MEDIA_ONLY_TOP = 38
 _PORTRAIT_ASPECT_LIMIT = 1.0
 _VERY_WIDE_ASPECT = 2.0
 _MIXED_MIN_COLUMN_WIDTH = 220
@@ -381,6 +393,32 @@ async def _download_avatar(client: httpx.AsyncClient | None, avatar_url: str) ->
         return None
 
 
+_COMMENT_AVATAR_SEMAPHORE = asyncio.Semaphore(2)
+
+
+async def _download_comment_avatars(
+    client: httpx.AsyncClient | None,
+    comments: tuple[TweetData, ...],
+) -> tuple[bytes | None, ...]:
+    async def download(comment: TweetData) -> bytes | None:
+        async with _COMMENT_AVATAR_SEMAPHORE:
+            return await _download_avatar(client, comment.avatar_url)
+
+    return tuple(await asyncio.gather(*(download(comment) for comment in comments)))
+
+
+async def _download_comment_media_previews(
+    client: httpx.AsyncClient | None,
+    comments: tuple[TweetData, ...],
+) -> tuple[tuple[MediaPreview, ...], ...]:
+    async def download(comment: TweetData) -> tuple[MediaPreview, ...]:
+        if not comment.media:
+            return ()
+        return await _download_media_previews(client, comment.media[:1])
+
+    return tuple(await asyncio.gather(*(download(comment) for comment in comments)))
+
+
 def _thumbnail_media(data: bytes) -> bytes | None:
     """把图片预览压缩成小 JPEG，避免把原图长期留在卡片渲染线程中。"""
 
@@ -439,14 +477,26 @@ async def _download_media_preview(client: httpx.AsyncClient, item: MediaItem) ->
                 timeout=_PREVIEW_TIMEOUT,
             ) as response:
                 response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length is not None and content_length.isdigit() and int(content_length) > _MAX_PREVIEW_BYTES:
+                    logger.debug(
+                        f"[XAnalyse] 媒体预览超过 {_MAX_PREVIEW_BYTES // 1024 // 1024} MB，跳过：{preview_url}"
+                    )
+                    return None
                 chunks = bytearray()
                 async for chunk in response.aiter_bytes():
+                    if len(chunks) + len(chunk) > _MAX_PREVIEW_BYTES:
+                        logger.debug(
+                            f"[XAnalyse] 媒体预览超过 {_MAX_PREVIEW_BYTES // 1024 // 1024} MB，跳过：{preview_url}"
+                        )
+                        return None
                     chunks.extend(chunk)
                 if not chunks:
                     return None
                 raw_data = bytes(chunks)
                 del chunks
             preview_data = await asyncio.to_thread(_thumbnail_media, raw_data)
+            del raw_data
             if preview_data is None:
                 logger.warning(f"[XAnalyse] 媒体预览解码失败：{preview_url}")
             return preview_data
@@ -1032,6 +1082,7 @@ def _render_media_tile(
     size: tuple[int, int],
     *,
     round_image: bool = True,
+    show_play_icon: bool = True,
 ) -> Image.Image:
     width, height = size
     panel = Image.new("RGB", size, _MEDIA_BACKGROUND)
@@ -1051,7 +1102,8 @@ def _render_media_tile(
         else:
             panel.paste(media_image, (image_left, image_top))
     elif preview.type in {"video", "animated_gif"}:
-        _draw_play_icon(panel_draw, width, height)
+        if show_play_icon:
+            _draw_play_icon(panel_draw, width, height)
     else:
         _draw_centered_text(
             panel,
@@ -1062,7 +1114,7 @@ def _render_media_tile(
             _MUTED,
         )
 
-    if media_image is not None and preview.type in {"video", "animated_gif"}:
+    if media_image is not None and preview.type in {"video", "animated_gif"} and show_play_icon:
         _draw_play_icon(panel_draw, width, height)
     return panel
 
@@ -1206,7 +1258,7 @@ def _draw_translation_row(
     text_bbox = font.getbbox("中")
     text_top = top + text_bbox[1]
     text_bottom = top + text_bbox[3]
-    icon_mask = _grok_icon_mask(_TRANSLATION_ICON_SIZE)
+    icon_mask = _grok_icon_mask(icon_size)
     icon_bbox = icon_mask.getbbox()
     if icon_bbox is None:
         icon_top = top + (row_height - icon_size) // 2
@@ -1695,6 +1747,273 @@ def _draw_avatar(
     draw.ellipse(avatar_box, outline=_BORDER, width=2)
 
 
+def _draw_comment_actions(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    comment: TweetData,
+    left: int,
+    top: int,
+    width: int,
+) -> None:
+    font = _load_card_font(19)
+    values = (
+        ("reply", comment.replies),
+        ("repost", comment.retweets),
+        ("like", comment.likes),
+        ("views", comment.views),
+    )
+    slot = width / len(values)
+    for index, (kind, value) in enumerate(values):
+        if value is None:
+            continue
+        label = format_number(value) if value != 0 else ""
+        content_width = _COMMENT_ICON_SIZE
+        if label:
+            content_width += 7 + _text_length(label, font)
+        x = round(left + index * slot + (slot - content_width) / 2)
+        if label:
+            _draw_card_text(image, draw, (x + _COMMENT_ICON_SIZE + 7, top + 4), label, font, _MUTED)
+        _draw_action_icon(image, kind, x, top + 6, _COMMENT_ICON_SIZE, _MUTED)
+
+
+def _draw_comment_media(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    items: tuple[MediaItem, ...],
+    previews: tuple[MediaPreview, ...],
+    left: int,
+    top: int,
+    max_width: int,
+) -> None:
+    if not items:
+        return
+    item = items[0]
+    preview = previews[0] if previews else MediaPreview(type=item.type)
+    width, height = _comment_media_size(item, max_width, preview.aspect_ratio)
+    tile = _render_media_tile(preview, (width, height), show_play_icon=False)
+    mask = Image.new("L", tile.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, width - 1, height - 1),
+        radius=_COMMENT_MEDIA_RADIUS,
+        fill=255,
+    )
+    image.paste(tile, (left, top), mask)
+    draw.rounded_rectangle(
+        (left, top, left + width - 1, top + height - 1),
+        radius=_COMMENT_MEDIA_RADIUS,
+        outline=_BORDER,
+        width=2,
+    )
+
+
+def _comment_media_size(
+    item: MediaItem,
+    max_width: int,
+    aspect_ratio: float | None = None,
+) -> tuple[int, int]:
+    ratio = aspect_ratio
+    if ratio is None and item.width is not None and item.height is not None:
+        if item.width > 0 and item.height > 0:
+            ratio = item.width / item.height
+    if ratio is None or ratio <= 0:
+        ratio = 16 / 9
+    width = min(_COMMENT_MEDIA_WIDTH, max_width)
+    height = max(1, round(width / ratio))
+    if height > _COMMENT_MEDIA_MAX_HEIGHT:
+        height = _COMMENT_MEDIA_MAX_HEIGHT
+        width = max(1, round(height * ratio))
+    return width, height
+
+
+def _comment_row_metrics(
+    comment: TweetData,
+    line_count: int,
+    available: int,
+) -> tuple[int, int, int, int]:
+    body_height = line_count * _COMMENT_LINE_HEIGHT
+    has_media = bool(comment.media)
+    body_top = _COMMENT_MEDIA_ONLY_TOP if has_media and line_count == 0 else _COMMENT_AVATAR_SIZE + 2
+    media_top = body_top + body_height + (4 if line_count else 0)
+    content_bottom = max(_COMMENT_AVATAR_SIZE, body_top + body_height)
+    if has_media:
+        media_height = _comment_media_size(comment.media[0], available)[1]
+        content_bottom = max(content_bottom, media_top + media_height)
+    actions_top = content_bottom + 8
+    return body_top, media_top, actions_top, actions_top + 64
+
+
+def _append_comment_panel_sync(
+    card_data: bytes,
+    comments: tuple[TweetData, ...],
+    avatar_data: tuple[bytes | None, ...],
+    media_data: tuple[tuple[MediaPreview, ...], ...],
+) -> bytes:
+    with BytesIO(card_data) as stream:
+        original = Image.open(stream).convert("RGB")
+    height = original.height
+    panel_width = _COMMENT_PANEL_WIDTH
+    content = Image.new("RGB", (panel_width, height), _WHITE)
+    draw = ImageDraw.Draw(content)
+    padding = _COMMENT_PADDING
+    avatar_size = _COMMENT_AVATAR_SIZE
+    header_left = padding + avatar_size + 16
+    available = panel_width - header_left - padding
+    author_font = _load_card_font(28, bold=True)
+    body_font = _load_card_font(30)
+    meta_font = _load_card_font(20)
+    _draw_card_text(
+        content,
+        draw,
+        (padding, 44),
+        f"评论区  ·  {len(comments)}",
+        _load_card_font(32, bold=True),
+        _TEXT,
+    )
+
+    y = 112
+    rendered_any = False
+    for index, comment in enumerate(comments):
+        author = comment.author_name.strip() or "未知用户"
+        handle = comment.author_handle.strip().lstrip("@")
+        translated = comment.translation is not None and bool(comment.translation.text.strip())
+        display_text = comment.translation.text if translated else comment.text
+        clean_text = display_text.strip()
+        lines = _wrap_card_text(clean_text, body_font, available) if clean_text else []
+        has_media = bool(comment.media)
+        if not lines and not has_media:
+            continue
+        if len(lines) > _COMMENT_MAX_LINES:
+            lines = lines[:_COMMENT_MAX_LINES]
+            lines[-1] = _ellipsize(f"{lines[-1]}…", body_font, available)
+        body_top_offset, media_top_offset, actions_top_offset, row_height = _comment_row_metrics(
+            comment,
+            len(lines),
+            available,
+        )
+        if y + row_height > height - 38:
+            break
+        if rendered_any:
+            draw.line((20, y - 17, panel_width - 20, y - 17), fill=_BORDER, width=1)
+        avatar = avatar_data[index] if index < len(avatar_data) else None
+        _draw_avatar(content, draw, avatar, padding, y, avatar_size, author)
+        author_label = _ellipsize(author, author_font, max(100, available // 2))
+        _draw_card_text(content, draw, (header_left, y), author_label, author_font, _TEXT)
+        subline = f"@{handle}" if handle else "X/Twitter"
+        _draw_card_text(
+            content,
+            draw,
+            (header_left + _text_length(author_label, author_font) + 10, y + 4),
+            _ellipsize(subline, meta_font, max(100, available // 2)),
+            meta_font,
+            _SECONDARY,
+        )
+
+        body_top = y + body_top_offset
+        if translated:
+            translation_top = y + avatar_size - 22 - 2
+            _draw_translation_row(
+                content,
+                draw,
+                comment.translation.source_lang,
+                translation_top,
+                meta_font,
+                left=header_left,
+                row_height=22,
+                icon_size=20,
+                icon_gap=4,
+            )
+        for line_index, line in enumerate(lines):
+            _draw_card_text(
+                content,
+                draw,
+                (header_left, body_top + line_index * _COMMENT_LINE_HEIGHT),
+                line,
+                body_font,
+                _TEXT,
+            )
+        if has_media:
+            comment_previews = media_data[index] if index < len(media_data) else ()
+            _draw_comment_media(
+                content,
+                draw,
+                comment.media,
+                comment_previews,
+                header_left,
+                y + media_top_offset,
+                available,
+            )
+        _draw_comment_actions(
+            content,
+            draw,
+            comment,
+            padding,
+            y + actions_top_offset,
+            panel_width - padding * 2,
+        )
+        y += row_height
+        rendered_any = True
+
+    panel = Image.new("RGB", (panel_width, height), _BG)
+    mask = Image.new("L", (panel_width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (20, 20, panel_width - 20, height - 20),
+        radius=_COMMENT_PANEL_RADIUS,
+        fill=255,
+    )
+    panel.paste(content, (0, 0), mask)
+    ImageDraw.Draw(panel).rounded_rectangle(
+        (20, 20, panel_width - 20, height - 20),
+        radius=_COMMENT_PANEL_RADIUS,
+        outline=_BORDER,
+        width=2,
+    )
+
+    gap = 20
+    result = Image.new("RGB", (original.width + panel_width - gap, height), _BG)
+    result.paste(original, (0, 0))
+    result.paste(panel, (original.width - gap, 0))
+    output = BytesIO()
+    result.save(output, format="JPEG", quality=86, optimize=True)
+    return output.getvalue()
+
+
+def select_visible_comments(card_data: bytes, comments: tuple[TweetData, ...]) -> tuple[TweetData, ...]:
+    """按评论面板布局筛选实际能显示的评论。"""
+
+    with BytesIO(card_data) as stream:
+        height = Image.open(stream).height
+    panel_width = _COMMENT_PANEL_WIDTH
+    padding = _COMMENT_PADDING
+    header_left = padding + _COMMENT_AVATAR_SIZE + 16
+    available = panel_width - header_left - padding
+    body_font = _load_card_font(30)
+    y = 112
+    visible: list[TweetData] = []
+    for comment in comments:
+        display_text = comment.translation.text if comment.translation is not None else comment.text
+        clean_text = display_text.strip()
+        lines = _wrap_card_text(clean_text, body_font, available) if clean_text else []
+        has_media = bool(comment.media)
+        if not lines and not has_media:
+            continue
+        _, _, _, row_height = _comment_row_metrics(
+            comment,
+            min(len(lines), _COMMENT_MAX_LINES),
+            available,
+        )
+        if y + row_height > height - 38:
+            break
+        y += row_height
+        visible.append(comment)
+    return tuple(visible)
+
+
+def count_visible_comments(card_data: bytes, comments: tuple[TweetData, ...]) -> int:
+    """按评论面板布局计算当前卡片能容纳的评论数量。"""
+
+    return len(select_visible_comments(card_data, comments))
+
+
 def _draw_quote_card(
     image: Image.Image,
     draw: ImageDraw.ImageDraw,
@@ -1998,9 +2317,40 @@ async def render_tweet_card(
     *,
     translation_source_lang: str = "",
     show_translation: bool = False,
+    comments: tuple[TweetData, ...] = (),
+    base_data: bytes | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> ScreenshotResult:
     """在线程池绘制卡片，避免 PIL 阻塞 Core 事件循环。"""
+
+    if base_data is not None:
+        if comments:
+            comment_avatar_data, comment_media_data = await asyncio.gather(
+                _download_comment_avatars(client, comments),
+                _download_comment_media_previews(client, comments),
+            )
+        else:
+            comment_avatar_data, comment_media_data = (), ()
+        try:
+            data = base_data
+            if comments:
+                data = await asyncio.to_thread(
+                    _append_comment_panel_sync,
+                    data,
+                    comments,
+                    comment_avatar_data,
+                    comment_media_data,
+                )
+        except (OSError, ValueError) as error:
+            logger.warning(f"[XAnalyse] PIL 卡片生成失败：{error}")
+            return ScreenshotResult(data=None)
+        finally:
+            del comment_avatar_data
+            del comment_media_data
+        if len(data) > _CARD_MAX_BYTES:
+            logger.warning(f"[XAnalyse] PIL 卡片过大（{len(data) / 1024 / 1024:.1f} MiB），跳过发送")
+            return ScreenshotResult(data=None)
+        return ScreenshotResult(data=data)
 
     avatar_data, media_previews, quote_assets = await asyncio.gather(
         _download_avatar(client, tweet.avatar_url),
@@ -2008,6 +2358,13 @@ async def render_tweet_card(
         _download_quote_assets(client, tweet.quote),
     )
     quote_avatar_data, quote_media_previews = quote_assets
+    if comments:
+        comment_avatar_data, comment_media_data = await asyncio.gather(
+            _download_comment_avatars(client, comments),
+            _download_comment_media_previews(client, comments),
+        )
+    else:
+        comment_avatar_data, comment_media_data = (), ()
     try:
         if avatar_data is None and not media_previews and quote_avatar_data is None and not quote_media_previews:
             data = await asyncio.to_thread(
@@ -2031,6 +2388,14 @@ async def render_tweet_card(
                 translation_source_lang,
                 show_translation,
             )
+        if comments:
+            data = await asyncio.to_thread(
+                _append_comment_panel_sync,
+                data,
+                comments,
+                comment_avatar_data,
+                comment_media_data,
+            )
     except (OSError, ValueError) as error:
         logger.warning(f"[XAnalyse] PIL 卡片生成失败：{error}")
         return ScreenshotResult(data=None)
@@ -2039,10 +2404,18 @@ async def render_tweet_card(
         del media_previews
         del quote_avatar_data
         del quote_media_previews
+        del comment_avatar_data
+        del comment_media_data
     if len(data) > _CARD_MAX_BYTES:
         logger.warning(f"[XAnalyse] PIL 卡片过大（{len(data) / 1024 / 1024:.1f} MiB），跳过发送")
         return ScreenshotResult(data=None)
     return ScreenshotResult(data=data)
 
 
-__all__ = ["MediaPreview", "ScreenshotResult", "render_tweet_card"]
+__all__ = [
+    "MediaPreview",
+    "ScreenshotResult",
+    "count_visible_comments",
+    "render_tweet_card",
+    "select_visible_comments",
+]
