@@ -19,6 +19,15 @@ sudo apt update
 sudo apt install -y ffmpeg
 ```
 
+Docker 部署的 GsCore 要在容器内装，宿主机装了容器里也用不到：
+
+```bash
+docker exec -it <容器名> apt update
+docker exec -it <容器名> apt install -y ffmpeg
+```
+
+容器重启后依然有效；重建容器则需要在镜像的 Dockerfile 里加上 `RUN apt-get update && apt-get install -y ffmpeg`。
+
 ## 使用
 
 发送以下命令：
