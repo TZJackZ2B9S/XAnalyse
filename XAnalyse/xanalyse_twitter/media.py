@@ -26,6 +26,8 @@ _MEDIA_TIMEOUT = httpx.Timeout(30.0, connect=8.0, pool=8.0)
 _PROBE_TIMEOUT = 8.0
 _FFMPEG_TIMEOUT = 120.0
 _MAX_MEDIA_DOWNLOAD_BYTES = 512 * 1024 * 1024
+_VIDEO_CACHE_TTL = 1800.0
+_VIDEO_CACHE_PREFIX = "xanalyse_video_"
 
 _GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {
     "low": (10, 480, 128, "bayer:bayer_scale=5"),
@@ -35,7 +37,7 @@ _GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {
 
 
 @on_core_start
-def _check_media_tools() -> None:
+async def _check_media_tools() -> None:
     missing = tuple(tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None)
     if missing:
         missing_text = "、".join(missing)
@@ -44,6 +46,7 @@ def _check_media_tools() -> None:
             "视频/图片洗白、GIF 合成或音轨判断将不可用，但插件仍会正常加载并回退发送原始媒体。"
             "请在 Core 所在系统或容器安装 ffmpeg（通常同时包含 ffprobe）后重启。"
         )
+    await _cleanup_video_cache()
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,16 @@ async def _remove_file(path: Path) -> None:
         await asyncio.to_thread(path.unlink)
     except FileNotFoundError:
         return
+
+
+async def _cleanup_video_cache() -> None:
+    for path in CACHE_PATH.glob(f"{_VIDEO_CACHE_PREFIX}*"):
+        await _remove_file(path)
+
+
+async def _remove_video_later(path: Path) -> None:
+    await asyncio.sleep(_VIDEO_CACHE_TTL)
+    await _remove_file(path)
 
 
 async def _ffmpeg_transform(data: bytes, args: list[str], input_suffix: str, output_suffix: str) -> bytes | None:
@@ -392,7 +405,16 @@ async def download_media(
     return None
 
 
-def media_to_message(media: PreparedMedia) -> Message:
-    if media.type == "video":
+async def media_to_message(media: PreparedMedia, *, video_send_type: str = "base64") -> Message:
+    """把已处理媒体转换为消息段；file 模式下视频落盘后以 file:// 发送。"""
+
+    if media.type != "video":
+        return MessageSegment.image(media.data)
+
+    if video_send_type != "file":
         return MessageSegment.video(media.data)
-    return MessageSegment.image(media.data)
+
+    path = CACHE_PATH / f"{_VIDEO_CACHE_PREFIX}{secrets.token_hex(8)}.mp4"
+    await _write_file(path, media.data)
+    asyncio.create_task(_remove_video_later(path), name=f"XAnalyse:remove-video:{path.name}")
+    return Message(type="video", data=path.as_uri())

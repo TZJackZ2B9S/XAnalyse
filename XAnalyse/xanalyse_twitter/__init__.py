@@ -232,7 +232,7 @@ async def _build_tweet_messages(
     for item in content.tweet.media:
         prepared = await download_media(client, item, settings)
         if prepared is not None:
-            media_messages.append(media_to_message(prepared))
+            media_messages.append(await media_to_message(prepared, video_send_type=settings.video_send_type))
     if len(media_messages) == 1:
         messages.append(media_messages[0])
     elif media_messages:
@@ -307,7 +307,7 @@ async def _send_tweet_unbounded(
         prepared = await download_media(client, item, settings)
         if prepared is None:
             continue
-        media_message = media_to_message(prepared)
+        media_message = await media_to_message(prepared, video_send_type=settings.video_send_type)
         media_messages.append(media_message)
         del prepared
     if len(media_messages) == 1:

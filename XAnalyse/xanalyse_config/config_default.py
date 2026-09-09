@@ -54,6 +54,16 @@ CONFIG_DEFAULT: dict[str, GSC] = {
         data="medium",
         options=["low", "medium", "high"],
     ),
+    "videoSendType": GsStrConfig(
+        title="视频发送方式",
+        desc=(
+            "base64：由 GsCore 编码后发送，兼容性最好；"
+            "file：视频落盘后以 file:// 发送，可避免 base64 内存放大，"
+            "但需要 Bot 端与 Core 能访问同一路径。"
+        ),
+        data="base64",
+        options=["base64", "file"],
+    ),
     "grokTranslation": GsBoolConfig(
         title="是否开启 Grok 翻译",
         desc="请求 FxTwitter v2 的 Grok 翻译；关闭时保留推文原文。",

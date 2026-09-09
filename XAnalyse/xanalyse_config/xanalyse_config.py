@@ -44,6 +44,7 @@ class XAnalyseSettings:
     proxy: str = ""
     gif_quality: str = "medium"
     convert_gif: bool = True
+    video_send_type: str = "base64"
 
 
 def _str(name: str) -> str:
@@ -113,4 +114,5 @@ def get_settings() -> XAnalyseSettings:
         detect_x_links=_bool("detectXLinks"),
         proxy=_str("proxy").strip(),
         convert_gif=_bool("convertGif"),
+        video_send_type=_str("videoSendType").strip().lower(),
     )

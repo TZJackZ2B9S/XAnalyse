@@ -54,6 +54,7 @@ x <X/Twitter 链接>
 | `commentParsing` | 是否解析并在卡片右侧绘制评论区；默认关闭 |
 | `convertGif` | 是否把无音轨视频转换为 GIF |
 | `gifQuality` | GIF 质量：`low`、`medium`、`high` |
+| `videoSendType` | 视频发送方式：`base64`（默认）或 `file`（落盘后以 `file://` 发送，需 Bot 端能访问 Core 同一路径） |
 | `maxMediaSize` | 单个媒体大小上限，单位 MB；`0` 使用 512 MB 安全上限，避免异常媒体耗尽内存 |
 | `fetchRetries` | API 请求失败后的重试次数 |
 | `outputLogs` | 是否输出详细日志 |
