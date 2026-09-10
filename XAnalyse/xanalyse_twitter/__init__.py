@@ -45,6 +45,7 @@ from ..utils.database import XAnalyseTweet
 from ..xanalyse_config import BloggerConfig, XAnalyseSettings, get_settings
 
 sv = SV("XAnalyse 推特解析", priority=4)
+test_sv = SV("XAnalyse 测试", priority=4)
 
 _subscription_job_id = "XAnalyse:subscription-check"
 _subscription_lock = asyncio.Lock()
@@ -344,7 +345,7 @@ async def check_command(bot: Bot, _ev: Event) -> None:
     await check_subscriptions(settings)
 
 
-@sv.on_command("cs", block=True)
+@test_sv.on_command("cs", block=True)
 async def check_status(bot: Bot, _ev: Event) -> None:
     await bot.send("XAnalyse 已加载。")
 
