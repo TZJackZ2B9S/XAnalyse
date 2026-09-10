@@ -52,7 +52,7 @@ x <X/Twitter 链接>
 | `proxy` | API 和媒体请求使用的代理，如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080` |
 | `grokTranslation` | 是否使用 Grok 翻译；外层推文和引用推文都会尝试翻译 |
 | `commentParsing` | 是否解析并在卡片右侧绘制评论区；默认关闭 |
-| `convertGif` | 是否把无音轨视频转换为 GIF |
+| `convertGif` | 是否把无音轨视频转换为 GIF；源视频超过 30 MB 时跳过转换，洗白后按视频发送 |
 | `gifQuality` | GIF 质量：`low`、`medium`、`high` |
 | `videoSendType` | 视频发送方式：`base64`（默认）或 `file`（落盘后以 `file://` 发送，需 Bot 端能访问 Core 同一路径） |
 | `maxMediaSize` | 单个媒体大小上限，单位 MB；`0` 使用 512 MB 安全上限，避免异常媒体耗尽内存 |
@@ -67,5 +67,5 @@ x <X/Twitter 链接>
 
 - 图片和视频默认按原分辨率处理，不主动压缩；媒体超过 `maxMediaSize` 或 512 MB 安全上限时跳过。
 - 图片、视频会进行洗白处理。多个媒体会以合并转发发送。
-- X 的 GIF 通常以无音轨 MP4 返回，开启 `convertGif` 后会按 `gifQuality` 转为 GIF。
+- X 的 GIF 通常以无音轨 MP4 返回，开启 `convertGif` 后会按 `gifQuality` 转为 GIF；源视频超过 30 MB 时不转换，洗白后走视频发送。
 - 临时媒体只在处理期间使用，处理结束后会清理。
