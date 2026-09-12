@@ -44,13 +44,13 @@ CONFIG_DEFAULT: dict[str, GSC] = {
         max_value=4096,
     ),
     "convertGif": GsBoolConfig(
-        title="无音轨视频转 GIF",
-        desc="开启后将无音轨视频按 GIF 质量转换；关闭时洗白后按视频发送。",
+        title="GIF 媒体转为 GIF",
+        desc="开启后把 API 标记为 GIF 的媒体按 GIF 质量合成；关闭时洗白后按视频发送。",
         data=True,
     ),
     "gifQuality": GsStrConfig(
         title="GIF 合成质量",
-        desc="无音轨视频按 GIF 处理时的帧率、尺寸和颜色质量。可选 low、medium、high。",
+        desc="GIF 媒体合成时的帧率、尺寸和颜色质量。可选 low、medium、high。",
         data="medium",
         options=["low", "medium", "high"],
     ),

@@ -24,10 +24,9 @@ from ..xanalyse_config import XAnalyseSettings
 from ..utils.resource.RESOURCE_PATH import CACHE_PATH
 
 _MEDIA_TIMEOUT = httpx.Timeout(30.0, connect=8.0, pool=8.0)
-_PROBE_TIMEOUT = 8.0
 _FFMPEG_TIMEOUT = 120.0
+_PROBE_TIMEOUT = 8.0
 _MAX_MEDIA_DOWNLOAD_BYTES = 512 * 1024 * 1024
-_GIF_SOURCE_MAX_BYTES = 30 * 1024 * 1024
 _VIDEO_CACHE_TTL = 1800.0
 _MEDIA_CACHE_PREFIX = "xanalyse_media_"
 _HEADER_BYTES = 64 * 1024
@@ -41,21 +40,37 @@ _CACHE_SWEEP_PREFIXES = (
 )
 _media_cleanup_tasks: set[asyncio.Task[None]] = set()
 
-_GIF_QUALITY_PRESETS: dict[str, tuple[int, int, int, str]] = {
-    "low": (10, 480, 128, "bayer:bayer_scale=5"),
-    "medium": (15, 720, 192, "sierra2_4a"),
-    "high": (20, 1080, 256, "sierra2_4a"),
+
+@dataclass(frozen=True)
+class GifQuality:
+    """GIF 合成参数；目标帧率按源视频平均帧率缩放后不超过上限。"""
+
+    fps_cap: int
+    fps_ratio: float
+    max_dimension: int
+    max_colors: int
+    dither: str
+
+
+_GIF_QUALITY_PRESETS: dict[str, GifQuality] = {
+    "low": GifQuality(15, 0.5, 480, 128, "bayer:bayer_scale=5"),
+    "medium": GifQuality(20, 0.75, 720, 192, "sierra2_4a"),
+    "high": GifQuality(30, 1.0, 1080, 256, "sierra2_4a"),
 }
 
 
 @on_core_start
 def _check_media_tools() -> None:
-    missing = tuple(tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None)
-    if missing:
-        missing_text = "、".join(missing)
+    if shutil.which("ffmpeg") is None:
         logger.warning(
-            f"[XAnalyse] 未找到系统命令：{missing_text}。"
-            "视频/图片洗白、GIF 合成或音轨判断将不可用，但插件仍会正常加载并回退发送原始媒体。"
+            "[XAnalyse] 未找到系统命令：ffmpeg。"
+            "视频/图片洗白与 GIF 合成将不可用，但插件仍会正常加载并回退发送原始媒体。"
+            "请在 Core 所在系统或容器安装 ffmpeg 后重启。"
+        )
+    if shutil.which("ffprobe") is None:
+        logger.warning(
+            "[XAnalyse] 未找到系统命令：ffprobe。"
+            "GIF 帧率将使用档位上限，不再随源视频帧率调整。"
             "请在 Core 所在系统或容器安装 ffmpeg（通常同时包含 ffprobe）后重启。"
         )
 
@@ -99,8 +114,27 @@ def is_animated_image_bytes(data: bytes) -> bool:
     return False
 
 
-async def _has_audio_stream(path: Path) -> bool | None:
-    """返回媒体是否包含音轨；探测失败时返回 None。"""
+def _gif_quality_options(quality: str) -> GifQuality:
+    normalized = quality.strip().lower()
+    if normalized not in _GIF_QUALITY_PRESETS:
+        normalized = "medium"
+    return _GIF_QUALITY_PRESETS[normalized]
+
+
+def _parse_frame_rate(value: str) -> float | None:
+    """解析 ffprobe 的 ``num/den`` 帧率文本；无法识别时返回 None。"""
+
+    numerator_text, separator, denominator_text = value.strip().partition("/")
+    if not separator or not numerator_text.isdigit() or not denominator_text.isdigit():
+        return None
+    denominator = int(denominator_text)
+    if denominator == 0:
+        return None
+    return int(numerator_text) / denominator
+
+
+async def _probe_average_fps(path: Path) -> float | None:
+    """读取视频平均帧率；探测失败时返回 None。"""
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -108,9 +142,9 @@ async def _has_audio_stream(path: Path) -> bool | None:
             "-v",
             "error",
             "-select_streams",
-            "a:0",
+            "v:0",
             "-show_entries",
-            "stream=codec_type",
+            "stream=avg_frame_rate",
             "-of",
             "default=nw=1:nk=1",
             str(path),
@@ -123,24 +157,25 @@ async def _has_audio_stream(path: Path) -> bool | None:
             if process.returncode is None:
                 process.kill()
             await process.communicate()
-            logger.debug("[XAnalyse] FFprobe 音轨探测超时")
+            logger.debug("[XAnalyse] FFprobe 帧率探测超时")
             return None
     except OSError as error:
-        logger.debug(f"[XAnalyse] FFprobe 不可用，跳过 GIF 判断：{error}")
+        logger.debug(f"[XAnalyse] FFprobe 不可用，跳过帧率探测：{error}")
         return None
 
     if process.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip()
-        logger.debug(f"[XAnalyse] FFprobe 音轨探测失败：{detail[-300:]}")
+        logger.debug(f"[XAnalyse] FFprobe 帧率探测失败：{detail[-300:]}")
         return None
-    return bool(stdout.strip())
+    return _parse_frame_rate(stdout.decode("utf-8", errors="replace"))
 
 
-def _gif_quality_options(quality: str) -> tuple[int, int, int, str]:
-    normalized = quality.strip().lower()
-    if normalized not in _GIF_QUALITY_PRESETS:
-        normalized = "medium"
-    return _GIF_QUALITY_PRESETS[normalized]
+def _gif_frame_rate(preset: GifQuality, source_fps: float | None) -> int:
+    """按源视频平均帧率缩放目标帧率；探测失败时退回档位上限。"""
+
+    if source_fps is None or source_fps <= 0:
+        return preset.fps_cap
+    return max(1, round(min(preset.fps_cap, source_fps * preset.fps_ratio)))
 
 
 def _cache_path(suffix: str) -> Path:
@@ -236,15 +271,18 @@ async def _ffmpeg_transform(input_path: Path, output_path: Path, args: list[str]
 
 
 async def _convert_video_to_gif(path: Path, quality: str) -> Path | None:
-    fps, max_dimension, max_colors, dither = _gif_quality_options(quality)
+    preset = _gif_quality_options(quality)
+    source_fps = await _probe_average_fps(path)
+    fps = _gif_frame_rate(preset, source_fps)
+    logger.debug(f"[XAnalyse] GIF 目标帧率 {fps}（源 {source_fps}）")
     scale = (
-        f"scale=w='min({max_dimension},iw)':h='min({max_dimension},ih)':"
+        f"scale=w='min({preset.max_dimension},iw)':h='min({preset.max_dimension},ih)':"
         "force_original_aspect_ratio=decrease:flags=lanczos"
     )
     filter_complex = (
         f"[0:v]fps={fps},{scale},split[s0][s1];"
-        f"[s0]palettegen=max_colors={max_colors}:stats_mode=diff[p];"
-        f"[s1][p]paletteuse=dither={dither}[v]"
+        f"[s0]palettegen=max_colors={preset.max_colors}:stats_mode=diff[p];"
+        f"[s1][p]paletteuse=dither={preset.dither}[v]"
     )
     output_path = _cache_path(".gif")
     transformed = await _ffmpeg_transform(
@@ -394,16 +432,10 @@ async def prepare_media(
     else:
         actual_type = "video" if item.type == "video" else "image"
 
-    if actual_type == "video" and convert_gif:
-        source_size = (await asyncio.to_thread(path.stat)).st_size
-        if source_size > _GIF_SOURCE_MAX_BYTES:
-            logger.info(f"[XAnalyse] 源视频超过 {_GIF_SOURCE_MAX_BYTES // 1024 // 1024} MB，跳过 GIF 转换：{path.name}")
-        else:
-            has_audio = await _has_audio_stream(path)
-            if item.type == "animated_gif" or has_audio is False:
-                gif_path = await _convert_video_to_gif(path, gif_quality)
-                if gif_path is not None:
-                    return PreparedMedia(path=gif_path, type="animated_gif")
+    if actual_type == "video" and convert_gif and item.type == "animated_gif":
+        gif_path = await _convert_video_to_gif(path, gif_quality)
+        if gif_path is not None:
+            return PreparedMedia(path=gif_path, type="animated_gif")
 
     washed_path = await wash_media(path, actual_type)
     return PreparedMedia(path=washed_path, type=actual_type)

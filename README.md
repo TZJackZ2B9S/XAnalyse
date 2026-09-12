@@ -1,4 +1,8 @@
-# XAnalyse
+<div align="center">
+  <img src="ICON.png" width="128" alt="XAnalyse">
+
+  <h1>XAnalyse</h1>
+</div>
 
 GsCore 的 X/Twitter 推文解析插件。支持推文、用户主页、引用推文和媒体，卡片使用 Pillow 绘制。
 
@@ -10,7 +14,7 @@ GsCore 的 X/Twitter 推文解析插件。支持推文、用户主页、引用�
 git clone --depth 1 https://github.com/TZJackZ2B9S/XAnalyse.git XAnalyse
 ```
 
-视频处理和 GIF 判断需要 `ffmpeg`、`ffprobe`。插件启动时会检查它们，缺少时仍可加载，但视频洗白和 GIF 转换不可用。
+视频洗白、GIF 合成和帧率探测需要 `ffmpeg`、`ffprobe`。插件启动时会检查它们，缺少时仍可加载，但对应功能不可用。
 
 Debian/Ubuntu：
 
@@ -52,8 +56,8 @@ x <X/Twitter 链接>
 | `proxy` | API 和媒体请求使用的代理，如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080` |
 | `grokTranslation` | 是否使用 Grok 翻译；外层推文和引用推文都会尝试翻译 |
 | `commentParsing` | 是否解析并在卡片右侧绘制评论区；默认关闭 |
-| `convertGif` | 是否把无音轨视频转换为 GIF；源视频超过 30 MB 时跳过转换，洗白后按视频发送 |
-| `gifQuality` | GIF 质量：`low`、`medium`、`high` |
+| `convertGif` | 是否把 API 标记为 GIF 的媒体合成为 GIF；关闭时洗白后按视频发送 |
+| `gifQuality` | GIF 质量：`low`、`medium`、`high`；帧率随源视频自适应 |
 | `videoSendType` | 视频发送方式：`base64`（默认）或 `file`（落盘后以 `file://` 发送，需 Bot 端能访问 Core 同一路径） |
 | `maxMediaSize` | 单个媒体大小上限，单位 MB；`0` 使用 512 MB 安全上限，避免异常媒体耗尽内存 |
 | `fetchRetries` | API 请求失败后的重试次数 |
@@ -67,5 +71,5 @@ x <X/Twitter 链接>
 
 - 图片和视频默认按原分辨率处理，不主动压缩；媒体超过 `maxMediaSize` 或 512 MB 安全上限时跳过。
 - 图片、视频会进行洗白处理。多个媒体会以合并转发发送。
-- X 的 GIF 通常以无音轨 MP4 返回，开启 `convertGif` 后会按 `gifQuality` 转为 GIF；源视频超过 30 MB 时不转换，洗白后走视频发送。
+- X 的 GIF 以 MP4 容器返回，接口会在媒体 `type` 中标记；开启 `convertGif` 后会按 `gifQuality` 合成 GIF。
 - 临时媒体只在处理期间使用，处理结束后会清理。
