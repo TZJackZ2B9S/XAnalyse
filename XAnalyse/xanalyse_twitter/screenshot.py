@@ -83,6 +83,16 @@ _SINGLE_MEDIA_MIN_HEIGHT = 260
 _MULTI_MEDIA_MAX_HEIGHT = 1_800
 _MULTI_MEDIA_MIN_HEIGHT = 220
 _MEDIA_RADIUS = 20
+_GIF_BADGE_ALPHA = 125
+_GIF_BADGE_FONT_MIN = 16
+_GIF_BADGE_FONT_MAX = 30
+_GIF_BADGE_FONT_RATIO = 0.055
+_GIF_BADGE_MARGIN_RATIO = 0.042
+_GIF_BADGE_GAP_RATIO = 0.28
+_GIF_BADGE_PAD_X_RATIO = 13 / 30
+_GIF_BADGE_PAD_TOP_RATIO = 19 / 30
+_GIF_BADGE_PAD_BOTTOM_RATIO = 17 / 30
+_GIF_BADGE_RADIUS_RATIO = 11 / 66
 _MEDIA_GAP = 16
 _QUOTE_PADDING = 28
 _QUOTE_TEXT_LINE_HEIGHT = 44
@@ -1077,6 +1087,60 @@ def _draw_play_icon(panel_draw: ImageDraw.ImageDraw, width: int, height: int) ->
     )
 
 
+def _tight_letter(font: ImageFont.FreeTypeFont, char: str) -> Image.Image:
+    """渲染单字并裁到真实墨迹，便于精确控制字距。"""
+
+    box = font.getbbox(char)
+    bitmap = Image.new("L", (box[2] - box[0] + 4, box[3] - box[1] + 4), 0)
+    ImageDraw.Draw(bitmap).text((2 - box[0], 2 - box[1]), char, font=font, fill=255)
+    return bitmap.crop(bitmap.getbbox())
+
+
+@lru_cache(maxsize=8)
+def _gif_badge(font_size: int) -> Image.Image:
+    """渲染 GIF 标识：半透明黑底、白色字，左下角叠加用。"""
+
+    font = _load_card_font(font_size, bold=True)
+    letters = [_tight_letter(font, char) for char in "GIF"]
+    cap = max(letter.height for letter in letters)
+    gap = max(1, round(_GIF_BADGE_GAP_RATIO * cap))
+    pad_x = round(_GIF_BADGE_PAD_X_RATIO * cap)
+    pad_top = round(_GIF_BADGE_PAD_TOP_RATIO * cap)
+    pad_bottom = round(_GIF_BADGE_PAD_BOTTOM_RATIO * cap)
+    width = sum(letter.width for letter in letters) + gap * (len(letters) - 1) + pad_x * 2
+    height = cap + pad_top + pad_bottom
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, width - 1, height - 1),
+        radius=max(2, round(_GIF_BADGE_RADIUS_RATIO * height)),
+        fill=255,
+    )
+    badge = Image.composite(
+        Image.new("RGBA", (width, height), (0, 0, 0, _GIF_BADGE_ALPHA)),
+        Image.new("RGBA", (width, height), (0, 0, 0, 0)),
+        mask,
+    )
+    cursor = pad_x
+    for letter in letters:
+        badge.paste(Image.new("RGBA", letter.size, (255, 255, 255, 255)), (cursor, pad_top), letter)
+        cursor += letter.width + gap
+    return badge
+
+
+def _draw_gif_badge(panel: Image.Image, width: int, height: int) -> None:
+    """在媒体面板左下角叠加 GIF 标识；面板过小时跳过。"""
+
+    short_side = min(width, height)
+    font_size = max(_GIF_BADGE_FONT_MIN, min(_GIF_BADGE_FONT_MAX, round(short_side * _GIF_BADGE_FONT_RATIO)))
+    badge = _gif_badge(font_size)
+    margin = round(short_side * _GIF_BADGE_MARGIN_RATIO)
+    left = margin
+    top = height - margin - badge.height
+    if top < 0 or left + badge.width > width:
+        return
+    panel.paste(badge, (left, top), badge)
+
+
 def _render_media_tile(
     preview: MediaPreview,
     size: tuple[int, int],
@@ -1116,6 +1180,8 @@ def _render_media_tile(
 
     if media_image is not None and preview.type in {"video", "animated_gif"} and show_play_icon:
         _draw_play_icon(panel_draw, width, height)
+    if preview.type == "animated_gif":
+        _draw_gif_badge(panel, width, height)
     return panel
 
 
