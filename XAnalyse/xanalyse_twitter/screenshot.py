@@ -93,6 +93,13 @@ _GIF_BADGE_PAD_X_RATIO = 13 / 30
 _GIF_BADGE_PAD_TOP_RATIO = 19 / 30
 _GIF_BADGE_PAD_BOTTOM_RATIO = 17 / 30
 _GIF_BADGE_RADIUS_RATIO = 11 / 66
+_BADGE_LABEL = "XAnalyse"
+_BADGE_ICON_SIZE = 28
+_BADGE_FONT_SIZE = 20
+_BADGE_GAP = 5
+_BADGE_PAD_X = 11
+_BADGE_PAD_Y = 5
+_BADGE_OUTLINE = (0, 0, 0)
 _MEDIA_GAP = 16
 _QUOTE_PADDING = 28
 _QUOTE_TEXT_LINE_HEIGHT = 44
@@ -1513,6 +1520,59 @@ def _point_in_polygon(point: tuple[float, float], polygon: tuple[tuple[float, fl
     return inside
 
 
+@lru_cache(maxsize=8)
+def _badge_icon_image(size: int) -> Image.Image:
+    """读取插件图标，缩放为指定边长。"""
+
+    resource = files(__package__.rsplit(".", 1)[0]).joinpath("assets/xanalyse_icon.png")
+    with resource.open("rb") as resource_file:
+        icon = Image.open(resource_file).convert("RGBA")
+    return icon.resize((size, size), Image.Resampling.LANCZOS)
+
+
+@lru_cache(maxsize=8)
+def _badge_logo_font(size: int) -> ImageFont.FreeTypeFont:
+    """加载插件 logo 字体，仅包含 XAnalyse 字形。"""
+
+    resource = files(__package__.rsplit(".", 1)[0]).joinpath("assets/xanalyse_logo.ttf")
+    with resource.open("rb") as resource_file:
+        return ImageFont.truetype(resource_file, size=size)
+
+
+def _draw_plugin_badge(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    right: int,
+    center_y: int,
+) -> None:
+    """在卡片右上角绘制插件药丸气泡。"""
+
+    font = _badge_logo_font(_BADGE_FONT_SIZE)
+    bbox = font.getbbox(_BADGE_LABEL)
+    text_height = bbox[3] - bbox[1]
+    height = max(_BADGE_ICON_SIZE, text_height) + _BADGE_PAD_Y * 2
+    width = _BADGE_PAD_X * 2 + _BADGE_ICON_SIZE + _BADGE_GAP + round(font.getlength(_BADGE_LABEL))
+    left = right - width
+    top = center_y - height // 2
+    draw.rounded_rectangle(
+        (left, top, left + width, top + height),
+        radius=height // 2,
+        fill=_MEDIA_BACKGROUND,
+        outline=_BADGE_OUTLINE,
+        width=2,
+    )
+    icon = _badge_icon_image(_BADGE_ICON_SIZE)
+    image.paste(icon, (left + _BADGE_PAD_X, top + (height - _BADGE_ICON_SIZE) // 2), icon)
+    _draw_card_text(
+        image,
+        draw,
+        (left + _BADGE_PAD_X + _BADGE_ICON_SIZE + _BADGE_GAP, top + round((height - text_height) / 2) - bbox[1]),
+        _BADGE_LABEL,
+        font,
+        _TEXT,
+    )
+
+
 @lru_cache(maxsize=16)
 def _action_icon_mask(kind: str, size: int) -> Image.Image:
     contours = _parse_icon_path(_X_ICON_PATHS[kind])
@@ -2317,7 +2377,7 @@ def _render_tweet_card_sync(
         handle_font,
         _SECONDARY,
     )
-    _draw_centered_text(image, draw, (_CARD_WIDTH - 86, 76), "···", _load_card_font(30, bold=True), _SECONDARY)
+    _draw_plugin_badge(image, draw, _CARD_WIDTH - _CARD_MARGIN, 77)
 
     if translation_source_lang:
         _draw_translation_row(image, draw, translation_source_lang, 166, small_font)
