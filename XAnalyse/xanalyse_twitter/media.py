@@ -31,6 +31,7 @@ _GIF_SOURCE_MAX_BYTES = 30 * 1024 * 1024
 _VIDEO_CACHE_TTL = 1800.0
 _MEDIA_CACHE_PREFIX = "xanalyse_media_"
 _HEADER_BYTES = 64 * 1024
+_LOCAL_FILE_HOST = "localhost"
 # 后三个是旧版本命名，保留清理以便升级后回收残留文件。
 _CACHE_SWEEP_PREFIXES = (
     _MEDIA_CACHE_PREFIX,
@@ -455,12 +456,23 @@ async def download_media(
     return None
 
 
+def _local_file_uri(path: Path) -> str:
+    """把本地文件转成带主机名的 file URI。
+
+    部分下游适配器会把缺少主机名的 ``file:///path`` 当作普通 URL 并补上
+    ``https://`` 前缀，导致本地文件被当成远程地址请求；RFC 8089 中
+    ``file://localhost/path`` 与 ``file:///path`` 等价，故显式写出主机名。
+    """
+
+    return f"file://{_LOCAL_FILE_HOST}{path.as_uri().removeprefix('file://')}"
+
+
 async def media_to_message(media: PreparedMedia, *, video_send_type: str = "base64") -> Message:
     """把已处理媒体转换为消息段，并接管媒体文件的清理。"""
 
     if media.type == "video" and video_send_type == "file":
         _schedule_media_cleanup(media.path)
-        return Message(type="video", data=media.path.as_uri())
+        return Message(type="video", data=_local_file_uri(media.path))
 
     try:
         data = await _read_file(media.path)
